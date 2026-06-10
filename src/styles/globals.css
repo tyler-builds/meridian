@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+/* Dark-only ADE. Design tokens drive Tailwind utilities (e.g. bg-bg, text-fg-subtle). */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+
+  --color-bg: #1c1c1c;
+  --color-bg-elevated: #232323;
+  --color-bg-hover: #2a2a2a;
+  --color-bg-active: #2e2e2e;
+  --color-border: #2e2e2e;
+  --color-border-subtle: #262626;
+  --color-fg: #e5e5e5;
+  --color-fg-subtle: #a1a1a1;
+  --color-fg-faint: #6b6b6b;
+  /* Muted teal accent — used sparingly for focus, toggles, and small
+     indicators to give the otherwise-monochrome UI some color. */
+  --color-accent: #2fa39a;
+  --color-accent-hover: #3cb6ac;
+  --color-accent-active: #258179;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv01", "cv02", "ss01";
+  letter-spacing: -0.15px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Terminal */
+.xterm {
+  padding: 4px 12px 8px;
+  height: 100%;
+  /* Don't inherit the app's global negative tracking — it breaks the grid. */
+  letter-spacing: normal;
+}
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+/* Skinny scrollbar inside terminals (overrides the 10px global one). Uses only
+   the webkit pseudo-elements — pairing them with `scrollbar-width` makes
+   WebView2 draw a second, native scrollbar alongside the custom one. */
+.xterm-viewport::-webkit-scrollbar {
+  width: 6px;
+}
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border: none;
+  border-radius: 3px;
+}
+.xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #474747;
+}
+
+/* Scrollbars */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #333333;
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--color-bg);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #404040;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* trees.software host: fill the panel and tighten the default 16px side inset. */
+file-tree-container {
+  height: 100%;
+  display: block;
+  --trees-padding-inline-override: 4px;
+}
+
+/* Scrollable without a visible scrollbar (tab strip). */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
