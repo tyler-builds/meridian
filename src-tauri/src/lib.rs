@@ -457,7 +457,11 @@ fn git_status(path: String) -> Result<GitStatus, String> {
 
     // NUL-delimited porcelain v1. Each entry is "XY <path>"; rename/copy entries
     // are followed by a separate token for the original path, which we consume.
-    let out = run_git(&path, &["status", "--porcelain=v1", "-z"])?;
+    // `--untracked-files=all` lists each new file individually rather than
+    // collapsing a wholly-untracked directory into one entry — otherwise a new
+    // folder of N files reports as a single addition (and the diff panel, which
+    // uses `ls-files --others`, would disagree with the file list / counter).
+    let out = run_git(&path, &["status", "--porcelain=v1", "--untracked-files=all", "-z"])?;
     let raw = String::from_utf8_lossy(&out.stdout);
     let mut tokens = raw.split('\0');
     let mut files = Vec::new();
@@ -595,6 +599,44 @@ async fn git_push(path: String) -> Result<(), String> {
         .ok_or_else(|| "No git remote configured".to_string())?
         .to_string();
     run_git_checked(&path, &["push", "-u", &remote, &branch]).map(|_| ())
+}
+
+/// Local branch names, ordered by most-recent commit first (the same order the
+/// branch switcher shows). Errs when the path isn't a git work tree.
+#[tauri::command]
+fn git_branches(path: String) -> Result<Vec<String>, String> {
+    let out = run_git_checked(
+        &path,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Switch to `branch`. When `create` is set, make it first (`checkout -b`) so a
+/// brand-new branch is created off the current HEAD and checked out. Git's own
+/// error (e.g. local changes would be overwritten) is surfaced to the caller.
+#[tauri::command]
+fn git_checkout(path: String, branch: String, create: bool) -> Result<(), String> {
+    let trimmed = branch.trim();
+    if trimmed.is_empty() {
+        return Err("Branch name is empty".to_string());
+    }
+    let args: Vec<&str> = if create {
+        vec!["checkout", "-b", trimmed]
+    } else {
+        vec!["checkout", trimmed]
+    };
+    run_git_checked(&path, &args).map(|_| ())
 }
 
 /// Path to the persisted app-state file in the app data dir. The directory is
@@ -1215,6 +1257,8 @@ pub fn run() {
             git_unstage,
             git_commit,
             git_push,
+            git_branches,
+            git_checkout,
             read_state,
             write_state,
             list_shells,

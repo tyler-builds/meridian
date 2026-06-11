@@ -12,22 +12,78 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FolderCode, Plus, Settings, X } from "lucide-react";
+import { Copy, FolderCode, Plus, Settings, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ProjectTab } from "@/types";
 import { cn } from "@/lib/utils";
 import { WindowControls } from "@/components/WindowControls";
+
+/**
+ * Right-click menu for a project tab. Cursor-anchored, grows downward (the tab
+ * bar is at the top of the window). Closes on outside click or Escape.
+ */
+function TabContextMenu({
+  x,
+  y,
+  onCopyPath,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  onCopyPath: () => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      className="fixed z-[80] min-w-[10rem] overflow-hidden rounded-lg border border-border bg-bg-elevated p-1 text-fg shadow-lg"
+      style={{ left: Math.min(x, window.innerWidth - 172), top: y }}
+    >
+      <button
+        type="button"
+        className="flex w-full cursor-default select-none items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13px] text-fg-subtle outline-none transition-colors hover:bg-bg-hover hover:text-fg"
+        onClick={() => {
+          onCopyPath();
+          onClose();
+        }}
+      >
+        <Copy size={13} strokeWidth={1.8} className="shrink-0" />
+        <span>Copy path</span>
+      </button>
+    </div>
+  );
+}
 
 function ProjectTabItem({
   tab,
   active,
   onSelect,
   onClose,
+  onContextMenu,
 }: {
   tab: ProjectTab;
   active: boolean;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
+  onContextMenu: (e: React.MouseEvent, tab: ProjectTab) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: tab.id });
@@ -45,6 +101,7 @@ function ProjectTabItem({
           onClose(tab.id);
         }
       }}
+      onContextMenu={(e) => onContextMenu(e, tab)}
       title={tab.name}
       className={cn(
         // Tabs size to their name and only shrink+truncate (down to a readable
@@ -111,6 +168,21 @@ export function TabBar({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
 
+  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(
+    null,
+  );
+
+  const onContextMenu = (e: React.MouseEvent, tab: ProjectTab) => {
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, path: tab.path });
+  };
+
+  const copyPath = (path: string) => {
+    navigator.clipboard.writeText(path).catch(() => {
+      /* clipboard unavailable */
+    });
+  };
+
   const onDragEnd = (e: DragEndEvent) => {
     const { active, over } = e;
     if (over && active.id !== over.id) {
@@ -142,6 +214,7 @@ export function TabBar({
                 active={tab.id === activeTabId}
                 onSelect={onSelect}
                 onClose={onClose}
+                onContextMenu={onContextMenu}
               />
             ))}
           </div>
@@ -172,6 +245,15 @@ export function TabBar({
       </button>
 
       <WindowControls />
+
+      {menu && (
+        <TabContextMenu
+          x={menu.x}
+          y={menu.y}
+          onCopyPath={() => copyPath(menu.path)}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }

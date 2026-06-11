@@ -32,6 +32,23 @@ export function gitCurrentBranch(path: string): Promise<string | null> {
   return invoke<string | null>("git_current_branch", { path });
 }
 
+/** Local branch names, most-recently-committed first. Rejects if not a repo. */
+export function gitBranches(path: string): Promise<string[]> {
+  return invoke<string[]>("git_branches", { path });
+}
+
+/**
+ * Switch to `branch`. With `create`, make it off the current HEAD first
+ * (`checkout -b`). Rejects with git's message (e.g. when local changes block it).
+ */
+export function gitCheckout(
+  path: string,
+  branch: string,
+  create = false,
+): Promise<void> {
+  return invoke("git_checkout", { path, branch, create });
+}
+
 /**
  * Unified diff of the current working-tree changes (tracked staged + unstaged
  * vs HEAD, plus untracked files). When `ignoreWhitespace` is true, whitespace-

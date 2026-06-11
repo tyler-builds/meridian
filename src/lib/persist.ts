@@ -26,6 +26,7 @@ const KEYS = [
   "meridian.sidebarWidth",
   "meridian.sidebarCollapsed",
   "meridian.browserHistory",
+  "meridian.statusBarItems",
 ];
 
 let cache: Record<string, string> = {};
