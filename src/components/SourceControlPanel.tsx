@@ -124,13 +124,15 @@ function GroupHeader({
   disabled: boolean;
 }) {
   return (
-    <div className="flex h-7 items-center gap-2 px-2 text-[11px] font-medium uppercase tracking-wide text-fg-faint">
+    <div className="flex h-7 shrink-0 items-center gap-2 border-y border-border-subtle bg-bg-elevated px-2 text-[11px] font-semibold uppercase tracking-wide text-fg-subtle">
       <span>{label}</span>
-      <span className="tabular-nums">{count}</span>
+      <span className="rounded bg-bg-active px-1.5 tabular-nums text-fg-faint">
+        {count}
+      </span>
       <button
         onClick={onAction}
         disabled={disabled}
-        className="ml-auto rounded px-1.5 py-0.5 text-[11px] normal-case tracking-normal text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-30"
+        className="ml-auto rounded px-1.5 py-0.5 text-[11px] font-medium normal-case tracking-normal text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-30"
       >
         {actionLabel}
       </button>
@@ -287,16 +289,17 @@ export function SourceControlPanel({
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto py-1">
+      <div className="flex min-h-0 flex-1 flex-col">
         {error ? (
           <p className="px-3 py-2 text-[12px] text-fg-subtle">{error}</p>
         ) : !status ? (
           <p className="px-3 py-2 text-[12px] text-fg-faint">Loading…</p>
         ) : (
           <>
-            {/* Both sections always render, even when empty, so the staged /
-                unstaged split is always visible. */}
-            <section>
+            {/* Both sections always render and each takes half the height with
+                its own scroll, so the staged / unstaged split is always visible
+                no matter how many files are in either list. */}
+            <section className="flex min-h-0 flex-1 flex-col">
               <GroupHeader
                 label="Changes"
                 count={changes.length}
@@ -304,7 +307,7 @@ export function SourceControlPanel({
                 onAction={() => stage(changes.map((f) => f.path))}
                 disabled={busy !== null || changes.length === 0}
               />
-              <div className="px-1">
+              <div className="min-h-0 flex-1 overflow-auto px-1 py-1">
                 {changes.length === 0 ? (
                   <p className="px-2 py-1 text-[12px] text-fg-faint">
                     No unstaged changes.
@@ -326,7 +329,7 @@ export function SourceControlPanel({
               </div>
             </section>
 
-            <section>
+            <section className="flex min-h-0 flex-1 flex-col">
               <GroupHeader
                 label="Staged Changes"
                 count={staged.length}
@@ -334,7 +337,7 @@ export function SourceControlPanel({
                 onAction={() => unstage(staged.map((f) => f.path))}
                 disabled={busy !== null || staged.length === 0}
               />
-              <div className="px-1">
+              <div className="min-h-0 flex-1 overflow-auto px-1 py-1">
                 {staged.length === 0 ? (
                   <p className="px-2 py-1 text-[12px] text-fg-faint">
                     No staged changes.
