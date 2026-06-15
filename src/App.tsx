@@ -21,6 +21,7 @@ import {
 } from "@/lib/paneTree";
 import { TabBar } from "@/components/TabBar";
 import { EmptyState } from "@/components/EmptyState";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ProjectView } from "@/components/ProjectView";
 import { StatusBar } from "@/components/StatusBar";
 import { SettingsDialog } from "@/components/SettingsDialog";
@@ -661,30 +662,35 @@ export default function App() {
                 tab.id === activeTabId ? "flex" : "hidden",
               )}
             >
-              <ProjectView
-                tab={tab}
-                active={tab.id === activeTabId}
-                sidebarWidth={sidebarWidth}
-                sidebarCollapsed={sidebarCollapsed}
-                onToggleSidebar={toggleSidebar}
-                onResizeSidebar={resizeSidebar}
-                onOpenFile={openFile}
-                onNewTerminal={newTerminal}
-                onNewBrowser={newBrowser}
-                onNewClaude={newClaude}
-                onNewGit={newGit}
-                onCloseMainTab={closeMainTab}
-                onReorderMainTab={reorderMainTab}
-                onSelectMainTab={selectMainTab}
-                onFileDirtyChange={setFileDirty}
-                onBrowserUrlChange={setBrowserUrl}
-                onBrowserTitleChange={setBrowserTitle}
-                onOpenBrowserUrl={openBrowserUrl}
-                onSplitPane={splitPane}
-                onClosePane={closePane}
-                onFocusPane={focusPane}
-                onResizePane={resizePane}
-              />
+              {/* Per-project boundary: a render error in one project's
+                  content shows a recoverable panel there instead of unmounting
+                  the whole app (tab bar, sidebar, and sibling projects stay). */}
+              <ErrorBoundary label={`project:${tab.name}`}>
+                <ProjectView
+                  tab={tab}
+                  active={tab.id === activeTabId}
+                  sidebarWidth={sidebarWidth}
+                  sidebarCollapsed={sidebarCollapsed}
+                  onToggleSidebar={toggleSidebar}
+                  onResizeSidebar={resizeSidebar}
+                  onOpenFile={openFile}
+                  onNewTerminal={newTerminal}
+                  onNewBrowser={newBrowser}
+                  onNewClaude={newClaude}
+                  onNewGit={newGit}
+                  onCloseMainTab={closeMainTab}
+                  onReorderMainTab={reorderMainTab}
+                  onSelectMainTab={selectMainTab}
+                  onFileDirtyChange={setFileDirty}
+                  onBrowserUrlChange={setBrowserUrl}
+                  onBrowserTitleChange={setBrowserTitle}
+                  onOpenBrowserUrl={openBrowserUrl}
+                  onSplitPane={splitPane}
+                  onClosePane={closePane}
+                  onFocusPane={focusPane}
+                  onResizePane={resizePane}
+                />
+              </ErrorBoundary>
             </div>
           ))
         )}

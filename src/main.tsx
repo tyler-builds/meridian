@@ -10,6 +10,7 @@ import "./styles/globals.css";
 
 import App from "./App";
 import { SettingsProvider } from "./lib/settings";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { initPersistence } from "./lib/persist";
 
 // Forward uncaught JS errors and unhandled promise rejections to the Rust log
@@ -42,8 +43,10 @@ window.addEventListener("unhandledrejection", (e) => {
 // origin change that plain localStorage would not).
 void initPersistence().finally(() => {
   ReactDOM.createRoot(document.getElementById("root")!).render(
-    <SettingsProvider>
-      <App />
-    </SettingsProvider>,
+    <ErrorBoundary label="app">
+      <SettingsProvider>
+        <App />
+      </SettingsProvider>
+    </ErrorBoundary>,
   );
 });
