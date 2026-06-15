@@ -23,6 +23,7 @@ import {
   DIFF_DELETION_COLOR,
   DIFF_THEME,
 } from "@/lib/diffTheme";
+import { useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 import { FileTypeIcon } from "@/components/FileTypeIcon";
 
@@ -192,10 +193,15 @@ export function DiffPanel({
   reloadNonce: number;
   focus: { path: string; nonce: number } | null;
 }) {
+  const {
+    diffStyle,
+    setDiffStyle,
+    diffWrap,
+    setDiffWrap,
+    diffIgnoreWhitespace,
+    setDiffIgnoreWhitespace,
+  } = useSettings();
   const [state, setState] = useState<LoadState>({ status: "loading" });
-  const [diffStyle, setDiffStyle] = useState<"unified" | "split">("unified");
-  const [wrap, setWrap] = useState(false);
-  const [ignoreWhitespace, setIgnoreWhitespace] = useState(false);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const reqRef = useRef(0);
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -203,14 +209,14 @@ export function DiffPanel({
   const load = useCallback(async () => {
     const req = ++reqRef.current;
     try {
-      const patch = await gitDiff(root, ignoreWhitespace);
+      const patch = await gitDiff(root, diffIgnoreWhitespace);
       if (reqRef.current !== req) return;
       setState({ status: "ready", files: splitPatchByFile(patch).map(parseFile) });
     } catch (err) {
       if (reqRef.current === req)
         setState({ status: "error", message: String(err) });
     }
-  }, [root, ignoreWhitespace]);
+  }, [root, diffIgnoreWhitespace]);
 
   // Load when the tab is active and on every reload signal from GitPanel, plus
   // whenever the whitespace option flips (which changes `load`'s identity).
@@ -237,12 +243,12 @@ export function DiffPanel({
       theme: DIFF_THEME,
       themeType: "dark",
       diffStyle,
-      overflow: wrap ? "wrap" : "scroll",
+      overflow: diffWrap ? "wrap" : "scroll",
       diffIndicators: "bars",
       // The panel renders its own collapsible file headers.
       disableFileHeader: true,
     }),
-    [diffStyle, wrap],
+    [diffStyle, diffWrap],
   );
 
   const toggleCollapsed = useCallback((path: string) => {
@@ -276,15 +282,15 @@ export function DiffPanel({
           <span className="mx-0.5 h-4 w-px bg-border" />
 
           <ToolButton
-            active={wrap}
-            onClick={() => setWrap((w) => !w)}
+            active={diffWrap}
+            onClick={() => setDiffWrap(!diffWrap)}
             title="Wrap long lines"
           >
             <WrapText size={14} strokeWidth={1.8} />
           </ToolButton>
           <ToolButton
-            active={ignoreWhitespace}
-            onClick={() => setIgnoreWhitespace((w) => !w)}
+            active={diffIgnoreWhitespace}
+            onClick={() => setDiffIgnoreWhitespace(!diffIgnoreWhitespace)}
             title="Ignore whitespace changes"
           >
             <Pilcrow size={14} strokeWidth={1.8} />

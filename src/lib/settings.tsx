@@ -24,6 +24,15 @@ interface SettingsContextValue {
   /** Run the `claude` command with --dangerously-skip-permissions. */
   dangerouslySkipPermissions: boolean;
   setDangerouslySkipPermissions: (value: boolean) => void;
+  /** Diff view: stacked (unified) vs side-by-side (split). */
+  diffStyle: "unified" | "split";
+  setDiffStyle: (value: "unified" | "split") => void;
+  /** Diff view: wrap long lines instead of scrolling. */
+  diffWrap: boolean;
+  setDiffWrap: (value: boolean) => void;
+  /** Diff view: ignore whitespace-only changes (re-runs git). */
+  diffIgnoreWhitespace: boolean;
+  setDiffIgnoreWhitespace: (value: boolean) => void;
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null);
@@ -40,6 +49,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // Off by default — this bypasses Claude's permission prompts.
   const [dangerouslySkipPermissions, setDangerSkipState] = useState<boolean>(
     () => persist.getItem("meridian.dangerouslySkipPermissions") === "1",
+  );
+  // Diff view preferences (default: unified, no wrap, show whitespace).
+  const [diffStyle, setDiffStyleState] = useState<"unified" | "split">(() =>
+    persist.getItem("meridian.diffStyle") === "split" ? "split" : "unified",
+  );
+  const [diffWrap, setDiffWrapState] = useState<boolean>(
+    () => persist.getItem("meridian.diffWrap") === "1",
+  );
+  const [diffIgnoreWhitespace, setDiffIgnoreWhitespaceState] = useState<boolean>(
+    () => persist.getItem("meridian.diffIgnoreWhitespace") === "1",
   );
 
   useEffect(() => {
@@ -83,6 +102,21 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setDangerSkipState(value);
   };
 
+  const setDiffStyle = (value: "unified" | "split") => {
+    persist.setItem("meridian.diffStyle", value);
+    setDiffStyleState(value);
+  };
+
+  const setDiffWrap = (value: boolean) => {
+    persist.setItem("meridian.diffWrap", value ? "1" : "0");
+    setDiffWrapState(value);
+  };
+
+  const setDiffIgnoreWhitespace = (value: boolean) => {
+    persist.setItem("meridian.diffIgnoreWhitespace", value ? "1" : "0");
+    setDiffIgnoreWhitespaceState(value);
+  };
+
   return (
     <SettingsContext.Provider
       value={{
@@ -94,6 +128,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setShowMinimap,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
+        diffStyle,
+        setDiffStyle,
+        diffWrap,
+        setDiffWrap,
+        diffIgnoreWhitespace,
+        setDiffIgnoreWhitespace,
       }}
     >
       {children}

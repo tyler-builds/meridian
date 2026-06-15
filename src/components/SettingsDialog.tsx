@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Code2, Terminal, X, type LucideIcon } from "lucide-react";
+import { Code2, GitCompare, Terminal, X, type LucideIcon } from "lucide-react";
 
 import { useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
@@ -12,7 +12,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-type SectionId = "terminal" | "editor";
+type SectionId = "terminal" | "editor" | "diff";
 
 const SECTIONS: {
   id: SectionId;
@@ -21,6 +21,7 @@ const SECTIONS: {
 }[] = [
   { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "editor", label: "Code Editor", icon: Code2 },
+  { id: "diff", label: "Diff Viewer", icon: GitCompare },
 ];
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -80,7 +81,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
           {/* Section content */}
           <div className="min-w-0 flex-1 overflow-y-auto p-5">
-            {section === "terminal" ? <TerminalSection /> : <EditorSection />}
+            {section === "terminal" ? (
+              <TerminalSection />
+            ) : section === "editor" ? (
+              <EditorSection />
+            ) : (
+              <DiffSection />
+            )}
           </div>
         </div>
       </div>
@@ -165,5 +172,52 @@ function EditorSection() {
     >
       <Switch checked={showMinimap} onCheckedChange={setShowMinimap} />
     </SettingRow>
+  );
+}
+
+function DiffSection() {
+  const {
+    diffStyle,
+    setDiffStyle,
+    diffWrap,
+    setDiffWrap,
+    diffIgnoreWhitespace,
+    setDiffIgnoreWhitespace,
+  } = useSettings();
+  return (
+    <>
+      <SettingRow
+        title="View style"
+        description="Show changes stacked (unified) or side by side (split)."
+      >
+        <Select
+          value={diffStyle}
+          onValueChange={(v) => setDiffStyle(v as "unified" | "split")}
+        >
+          <SelectTrigger className="w-52">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="unified">Unified</SelectItem>
+            <SelectItem value="split">Split</SelectItem>
+          </SelectContent>
+        </Select>
+      </SettingRow>
+      <SettingRow
+        title="Wrap long lines"
+        description="Wrap lines that exceed the panel width instead of scrolling."
+      >
+        <Switch checked={diffWrap} onCheckedChange={setDiffWrap} />
+      </SettingRow>
+      <SettingRow
+        title="Ignore whitespace"
+        description="Hide whitespace-only changes when computing the diff."
+      >
+        <Switch
+          checked={diffIgnoreWhitespace}
+          onCheckedChange={setDiffIgnoreWhitespace}
+        />
+      </SettingRow>
+    </>
   );
 }
