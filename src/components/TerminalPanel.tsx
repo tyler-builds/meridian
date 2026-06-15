@@ -102,17 +102,35 @@ export function TerminalPanel({
     term.loadAddon(new WebLinksAddon());
     term.open(el);
 
-    // GPU renderer with customGlyphs: draws box-drawing/block characters
-    // programmatically so panel borders (e.g. Claude Code's UI) connect
-    // cleanly instead of rendering as broken dashes. Falls back to the DOM
-    // renderer automatically if WebGL is unavailable or the context is lost.
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      /* WebGL unavailable; DOM renderer remains */
-    }
+    // GPU renderer: draws box-drawing/block characters programmatically so
+    // panel borders (e.g. Claude Code's UI) connect cleanly instead of
+    // rendering as broken dashes. Created lazily on the pane's first visible
+    // layout — each instance holds one of the page's ~16 WebGL contexts, and
+    // the app keeps every pane of every project mounted (hidden via CSS), so
+    // eager creation exhausted contexts at session restore. Once created it is
+    // kept while hidden: disposing/recreating on tab switches re-initializes
+    // the renderer against a 0×0 container and leaves the terminal blank.
+    let webgl: WebglAddon | undefined;
+    let webglLosses = 0;
+    const ensureWebgl = () => {
+      if (disposed || webgl || webglLosses >= 2) return;
+      if (el.clientWidth === 0 || el.clientHeight === 0) return;
+      try {
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => {
+          // Context lost (context-cap eviction or GPU-process reset): fall
+          // back to the DOM renderer and retry on a later resize, but give up
+          // after repeated losses (WebGL effectively unusable, e.g. over RDP).
+          webglLosses += 1;
+          addon.dispose();
+          if (webgl === addon) webgl = undefined;
+        });
+        term.loadAddon(addon);
+        webgl = addon;
+      } catch {
+        webglLosses = 2; // WebGL unavailable; keep the DOM renderer
+      }
+    };
 
     const safeFit = () => {
       if (el.clientWidth > 0 && el.clientHeight > 0) {
@@ -124,6 +142,7 @@ export function TerminalPanel({
       }
     };
     safeFit();
+    ensureWebgl();
 
     // xterm measures cell size at open(); if the terminal font loads afterward
     // the grid metrics are stale. Refit once JetBrains Mono (regular + bold) is
@@ -158,6 +177,14 @@ export function TerminalPanel({
         unlistenExit?.();
         return;
       }
+      // Wire keyboard → PTY BEFORE spawning. This is not just for typing:
+      // ConPTY opens with an ESC[6n cursor-position query and prints nothing
+      // until xterm's automatic reply — which xterm emits through onData. If
+      // the query arrives before this handler exists, the reply is lost and
+      // the shell waits forever (a permanently blank terminal). Writes to a
+      // not-yet-spawned id are a no-op in the backend, so attaching early is
+      // safe.
+      term.onData((data) => void ptyWrite(ptyId, data));
       try {
         await ptySpawn(ptyId, cwd, term.cols, term.rows, shell);
         spawned = true;
@@ -171,7 +198,6 @@ export function TerminalPanel({
         void ptyKill(ptyId);
         return;
       }
-      term.onData((data) => void ptyWrite(ptyId, data));
       // Run the tab's initial command (e.g. `claude`). The shell buffers stdin
       // until its prompt is ready, so sending it now is safe.
       if (initialCommand) {
@@ -182,6 +208,10 @@ export function TerminalPanel({
     const resizeObserver = new ResizeObserver(() => {
       safeFit();
       syncPtySize();
+      // Also fires when a hidden pane is first shown (0×0 → real size), which
+      // is what creates the deferred WebGL renderer — after the fit above, so
+      // it initializes against real dimensions.
+      ensureWebgl();
     });
     resizeObserver.observe(el);
 
@@ -191,6 +221,8 @@ export function TerminalPanel({
       unlistenOutput?.();
       unlistenExit?.();
       if (spawned) void ptyKill(ptyId);
+      webgl?.dispose();
+      webgl = undefined;
       term.dispose();
     };
   }, [cwd, shell, initialCommand]);

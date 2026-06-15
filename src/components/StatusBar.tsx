@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, FileMinus, FilePen, FilePlus, GitBranch } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  FileMinus,
+  FilePen,
+  FilePlus,
+  GitBranch,
+} from "lucide-react";
 
 import {
   claudeUsage,
@@ -11,6 +19,7 @@ import {
 } from "@/lib/tauri";
 import { ClaudeIcon } from "@/components/ClaudeIcon";
 import { BranchSwitcher } from "@/components/BranchSwitcher";
+import { GitStatusPopup } from "@/components/GitStatusPopup";
 import { DIFF_ADDITION_COLOR, DIFF_DELETION_COLOR } from "@/lib/diffTheme";
 import { persist } from "@/lib/persist";
 
@@ -107,6 +116,14 @@ interface ChangeCounts {
   deleted: number;
 }
 
+/** Per-category file counts plus the branch's ahead/behind state vs upstream. */
+interface GitSummary {
+  counts: ChangeCounts;
+  ahead: number;
+  behind: number;
+  hasUpstream: boolean;
+}
+
 /** Bucket each changed file into added / deleted / modified (one bucket each). */
 function countChanges(files: GitFile[]): ChangeCounts {
   let added = 0;
@@ -120,21 +137,28 @@ function countChanges(files: GitFile[]): ChangeCounts {
   return { added, modified, deleted };
 }
 
+/** True when the summary has anything worth surfacing (changes or out-of-sync). */
+function hasGitActivity(s: GitSummary): boolean {
+  const { added, modified, deleted } = s.counts;
+  return added + modified + deleted > 0 || s.ahead > 0 || s.behind > 0;
+}
+
 /**
  * Poll the active project's working-tree status and reduce it to per-category
- * file counts. Refreshes on the same cadence as the branch, plus on window
- * focus so it picks up changes made while the app was in the background.
+ * file counts plus ahead/behind state. Refreshes on the same cadence as the
+ * branch, plus on window focus so it picks up changes made while the app was in
+ * the background.
  */
-function useGitChanges(
+function useGitSummary(
   path: string | undefined,
   enabled: boolean,
   nonce: number,
-): ChangeCounts | null {
-  const [counts, setCounts] = useState<ChangeCounts | null>(null);
+): GitSummary | null {
+  const [summary, setSummary] = useState<GitSummary | null>(null);
 
   useEffect(() => {
     if (!path) {
-      setCounts(null);
+      setSummary(null);
       return;
     }
     // Keep the last value when merely toggled off (see useGitBranch).
@@ -143,10 +167,16 @@ function useGitChanges(
     const refresh = () => {
       gitStatus(path)
         .then((s) => {
-          if (active) setCounts(countChanges(s.files));
+          if (active)
+            setSummary({
+              counts: countChanges(s.files),
+              ahead: s.ahead,
+              behind: s.behind,
+              hasUpstream: s.hasUpstream,
+            });
         })
         .catch(() => {
-          if (active) setCounts(null);
+          if (active) setSummary(null);
         });
     };
     refresh();
@@ -159,7 +189,7 @@ function useGitChanges(
     };
   }, [path, enabled, nonce]);
 
-  return counts;
+  return summary;
 }
 
 /**
@@ -247,49 +277,76 @@ function UsageBar({ label, window }: { label: string; window: ClaudeUsageWindow 
   );
 }
 
-/** Per-category changed-file counts: colored icon + number for each non-zero bucket. */
-function GitChanges({ counts }: { counts: ChangeCounts }) {
-  const { added, modified, deleted } = counts;
+/**
+ * Clickable status item: per-category changed-file counts plus the branch's
+ * ahead/behind state. Renders nothing when the tree is clean and in sync. Click
+ * opens the git status popup (sync actions + scrollable file list).
+ */
+function GitStatusItem({
+  summary,
+  onOpen,
+}: {
+  summary: GitSummary;
+  onOpen: (rect: DOMRect) => void;
+}) {
+  if (!hasGitActivity(summary)) return null;
+
+  const { added, modified, deleted } = summary.counts;
+  const { ahead, behind, hasUpstream } = summary;
   const total = added + modified + deleted;
-  if (total === 0) return null;
+  const showSync = hasUpstream && (ahead > 0 || behind > 0);
+
+  const title =
+    `${total} file${total === 1 ? "" : "s"} changed${
+      added ? ` · ${added} added` : ""
+    }${modified ? ` · ${modified} modified` : ""}${
+      deleted ? ` · ${deleted} deleted` : ""
+    }${behind ? ` · ${behind} behind` : ""}${
+      ahead ? ` · ${ahead} ahead` : ""
+    } — click for details`.replace(/^0 files changed · /, "");
 
   return (
-    <div
-      className="flex items-center gap-2"
-      title={`${total} file${total === 1 ? "" : "s"} changed${
-        added ? ` · ${added} added` : ""
-      }${modified ? ` · ${modified} modified` : ""}${
-        deleted ? ` · ${deleted} deleted` : ""
-      }`}
+    <button
+      type="button"
+      className="flex items-center gap-2 rounded px-1 -mx-1 text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+      title={title}
+      onClick={(e) => onOpen(e.currentTarget.getBoundingClientRect())}
     >
       {added > 0 && (
-        <span
-          className="flex items-center gap-0.5"
-          style={{ color: DIFF_ADDITION_COLOR }}
-        >
+        <span className="flex items-center gap-0.5" style={{ color: DIFF_ADDITION_COLOR }}>
           <FilePlus size={12} strokeWidth={1.8} className="shrink-0" />
           {added}
         </span>
       )}
       {modified > 0 && (
-        <span
-          className="flex items-center gap-0.5"
-          style={{ color: MODIFIED_COLOR }}
-        >
+        <span className="flex items-center gap-0.5" style={{ color: MODIFIED_COLOR }}>
           <FilePen size={12} strokeWidth={1.8} className="shrink-0" />
           {modified}
         </span>
       )}
       {deleted > 0 && (
-        <span
-          className="flex items-center gap-0.5"
-          style={{ color: DIFF_DELETION_COLOR }}
-        >
+        <span className="flex items-center gap-0.5" style={{ color: DIFF_DELETION_COLOR }}>
           <FileMinus size={12} strokeWidth={1.8} className="shrink-0" />
           {deleted}
         </span>
       )}
-    </div>
+      {showSync && (
+        <span className="flex items-center gap-1.5 text-fg-faint">
+          {behind > 0 && (
+            <span className="flex items-center gap-0.5">
+              <ArrowDown size={12} strokeWidth={1.8} className="shrink-0" />
+              {behind}
+            </span>
+          )}
+          {ahead > 0 && (
+            <span className="flex items-center gap-0.5">
+              <ArrowUp size={12} strokeWidth={1.8} className="shrink-0" />
+              {ahead}
+            </span>
+          )}
+        </span>
+      )}
+    </button>
   );
 }
 
@@ -363,12 +420,14 @@ export function StatusBar({ projectPath }: { projectPath?: string }) {
   const { visible, toggle } = useStatusBarVisibility();
   const [reloadNonce, setReloadNonce] = useState(0);
   const branch = useGitBranch(projectPath, visible.branch, reloadNonce);
-  const changes = useGitChanges(projectPath, visible.changes, reloadNonce);
+  const summary = useGitSummary(projectPath, visible.changes, reloadNonce);
   const usage = useClaudeUsage(visible.usage);
 
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Viewport rect of the branch item while the switcher is open (null = closed).
   const [switcherAnchor, setSwitcherAnchor] = useState<DOMRect | null>(null);
+  // Viewport rect of the changes item while the status popup is open (null = closed).
+  const [statusAnchor, setStatusAnchor] = useState<DOMRect | null>(null);
 
   return (
     <footer
@@ -392,7 +451,9 @@ export function StatusBar({ projectPath }: { projectPath?: string }) {
         </button>
       )}
 
-      {visible.changes && changes && <GitChanges counts={changes} />}
+      {visible.changes && summary && (
+        <GitStatusItem summary={summary} onOpen={setStatusAnchor} />
+      )}
 
       {visible.usage && usage?.available && (
         <div className="ml-auto flex items-center gap-3">
@@ -419,6 +480,15 @@ export function StatusBar({ projectPath }: { projectPath?: string }) {
           anchor={switcherAnchor}
           onClose={() => setSwitcherAnchor(null)}
           onSwitched={() => setReloadNonce((n) => n + 1)}
+        />
+      )}
+
+      {statusAnchor && projectPath && (
+        <GitStatusPopup
+          path={projectPath}
+          anchor={statusAnchor}
+          onClose={() => setStatusAnchor(null)}
+          onChanged={() => setReloadNonce((n) => n + 1)}
         />
       )}
     </footer>

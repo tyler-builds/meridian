@@ -62,16 +62,22 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
     }
 }
 
+/// Async + spawn_blocking: a full disk walk can take seconds on a big project,
+/// and sync commands run on the main thread (blocking the UI).
 #[tauri::command]
-fn read_project_tree(path: String) -> Result<Vec<String>, String> {
-    let root = std::path::PathBuf::from(&path);
-    if !root.is_dir() {
-        return Err(format!("Not a directory: {path}"));
-    }
-    let mut out = Vec::new();
-    walk(&root, &root, &mut out, 0);
-    out.sort();
-    Ok(out)
+async fn read_project_tree(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::PathBuf::from(&path);
+        if !root.is_dir() {
+            return Err(format!("Not a directory: {path}"));
+        }
+        let mut out = Vec::new();
+        walk(&root, &root, &mut out, 0);
+        out.sort();
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -332,10 +338,18 @@ fn run_git(root: &str, args: &[&str]) -> Result<std::process::Output, String> {
 /// dropped from the tracked diff (`-w`). Returns an empty string when there are
 /// no changes. Errs when the path isn't a git work tree or `git` isn't
 /// available.
+/// Async + spawn_blocking: spawns one `git diff --no-index` per untracked file,
+/// which on the main thread would freeze the UI for large change sets.
 #[tauri::command]
-fn git_diff(path: String, ignore_whitespace: bool) -> Result<String, String> {
+async fn git_diff(path: String, ignore_whitespace: bool) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || git_diff_blocking(&path, ignore_whitespace))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn git_diff_blocking(path: &str, ignore_whitespace: bool) -> Result<String, String> {
     // Confirm it's a work tree; this also surfaces "git not installed".
-    let check = run_git(&path, &["rev-parse", "--is-inside-work-tree"])?;
+    let check = run_git(path, &["rev-parse", "--is-inside-work-tree"])?;
     if !check.status.success() {
         let err = String::from_utf8_lossy(&check.stderr);
         let err = err.trim();
@@ -354,22 +368,22 @@ fn git_diff(path: String, ignore_whitespace: bool) -> Result<String, String> {
     }
     let mut head_args = tracked_args.clone();
     head_args.push("HEAD");
-    let tracked = run_git(&path, &head_args)?;
+    let tracked = run_git(path, &head_args)?;
     let mut patch = if tracked.status.success() {
         String::from_utf8_lossy(&tracked.stdout).into_owned()
     } else {
-        let plain = run_git(&path, &tracked_args)?;
+        let plain = run_git(path, &tracked_args)?;
         String::from_utf8_lossy(&plain.stdout).into_owned()
     };
 
     // Append untracked files as additions so new files appear in the diff.
     // `--no-index` exits non-zero when files differ (the normal case here), so
     // its status is ignored — only stdout matters.
-    let untracked = run_git(&path, &["ls-files", "--others", "--exclude-standard"])?;
+    let untracked = run_git(path, &["ls-files", "--others", "--exclude-standard"])?;
     if untracked.status.success() {
         let list = String::from_utf8_lossy(&untracked.stdout).into_owned();
         for file in list.lines().filter(|l| !l.trim().is_empty()) {
-            let out = run_git(&path, &["diff", "--no-index", "--", "/dev/null", file])?;
+            let out = run_git(path, &["diff", "--no-index", "--", "/dev/null", file])?;
             patch.push_str(&String::from_utf8_lossy(&out.stdout));
         }
     }
@@ -437,14 +451,26 @@ struct GitStatus {
     has_remote: bool,
     /// Whether HEAD resolves (false in a fresh repo with no commits yet).
     has_commits: bool,
+    /// Local commits not on any remote — the number a push would send. Defined
+    /// even before the first push (when `ahead` is 0 for lack of an upstream),
+    /// and 0 when there is nothing to push.
+    unpushed: u32,
 }
 
 /// Structured status for the Git panel: the changed-file list (parsed from
 /// `git status --porcelain=v1 -z`) plus branch/upstream/ahead-behind context.
 /// Errs when the path isn't a git work tree or `git` isn't available.
+/// Async + spawn_blocking: the status bar polls this every 5s and it spawns a
+/// handful of git subprocesses; on the main thread each poll stalled the UI.
 #[tauri::command]
-fn git_status(path: String) -> Result<GitStatus, String> {
-    let check = run_git(&path, &["rev-parse", "--is-inside-work-tree"])?;
+async fn git_status(path: String) -> Result<GitStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || git_status_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn git_status_blocking(path: &str) -> Result<GitStatus, String> {
+    let check = run_git(path, &["rev-parse", "--is-inside-work-tree"])?;
     if !check.status.success() {
         let err = String::from_utf8_lossy(&check.stderr);
         let err = err.trim();
@@ -461,7 +487,7 @@ fn git_status(path: String) -> Result<GitStatus, String> {
     // collapsing a wholly-untracked directory into one entry — otherwise a new
     // folder of N files reports as a single addition (and the diff panel, which
     // uses `ls-files --others`, would disagree with the file list / counter).
-    let out = run_git(&path, &["status", "--porcelain=v1", "--untracked-files=all", "-z"])?;
+    let out = run_git(path, &["status", "--porcelain=v1", "--untracked-files=all", "-z"])?;
     let raw = String::from_utf8_lossy(&out.stdout);
     let mut tokens = raw.split('\0');
     let mut files = Vec::new();
@@ -493,16 +519,16 @@ fn git_status(path: String) -> Result<GitStatus, String> {
         });
     }
 
-    let has_commits = run_git(&path, &["rev-parse", "--verify", "HEAD"])
+    let has_commits = run_git(path, &["rev-parse", "--verify", "HEAD"])
         .map(|o| o.status.success())
         .unwrap_or(false);
-    let branch = git_str(&path, &["symbolic-ref", "--short", "HEAD"]);
+    let branch = git_str(path, &["symbolic-ref", "--short", "HEAD"]);
     let detached = branch.is_none() && has_commits;
-    let has_remote = git_str(&path, &["remote"])
+    let has_remote = git_str(path, &["remote"])
         .map(|s| !s.is_empty())
         .unwrap_or(false);
     let has_upstream = git_str(
-        &path,
+        path,
         &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )
     .is_some();
@@ -511,13 +537,27 @@ fn git_status(path: String) -> Result<GitStatus, String> {
     let (mut ahead, mut behind) = (0u32, 0u32);
     if has_upstream {
         if let Some(counts) =
-            git_str(&path, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
+            git_str(path, &["rev-list", "--left-right", "--count", "@{u}...HEAD"])
         {
             let mut parts = counts.split_whitespace();
             behind = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
             ahead = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
         }
     }
+
+    // Commits on HEAD not reachable from any remote-tracking branch — what a
+    // push would actually send. Unlike `ahead` (which requires an upstream)
+    // this is meaningful before the first push and is 0 when nothing is
+    // unpushed, so the Source Control button can show a count and won't offer
+    // to push an unchanged branch. Gated on a remote: with none configured,
+    // `--remotes` expands to nothing and the count would be every commit.
+    let unpushed = if has_commits && has_remote {
+        git_str(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"])
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
 
     Ok(GitStatus {
         files,
@@ -528,6 +568,7 @@ fn git_status(path: String) -> Result<GitStatus, String> {
         has_upstream,
         has_remote,
         has_commits,
+        unpushed,
     })
 }
 
@@ -599,6 +640,84 @@ async fn git_push(path: String) -> Result<(), String> {
         .ok_or_else(|| "No git remote configured".to_string())?
         .to_string();
     run_git_checked(&path, &["push", "-u", &remote, &branch]).map(|_| ())
+}
+
+/// Pull the current branch from its upstream (`git pull --no-edit`, so a merge
+/// commit is created non-interactively rather than opening an editor and
+/// hanging). Runs async so a slow network fetch doesn't block the UI thread;
+/// `GIT_TERMINAL_PROMPT=0` keeps an unauthenticated pull from hanging. Git's own
+/// error (e.g. local changes would be overwritten, or merge conflicts) is
+/// surfaced to the caller. The caller is expected to gate this on a clean
+/// working tree, but git's overwrite protection is the real backstop.
+#[tauri::command]
+async fn git_pull(path: String) -> Result<(), String> {
+    let has_upstream = run_git(
+        &path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+    if !has_upstream {
+        return Err("No upstream branch to pull from".to_string());
+    }
+    run_git_checked(&path, &["pull", "--no-edit"]).map(|_| ())
+}
+
+/// Fetch from the remote so the local ahead/behind counts reflect the latest
+/// upstream, without touching the working tree. Prunes deleted remote branches.
+/// Runs async (network) with `GIT_TERMINAL_PROMPT=0` so an unauthenticated
+/// fetch fails fast instead of hanging. Errs when there's no remote configured.
+#[tauri::command]
+async fn git_fetch(path: String) -> Result<(), String> {
+    let has_remote = git_str(&path, &["remote"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_remote {
+        return Err("No git remote configured".to_string());
+    }
+    run_git_checked(&path, &["fetch", "--prune"]).map(|_| ())
+}
+
+/// Commit subjects (one per entry, newest first) of the local commits a push
+/// would send: those on HEAD not yet on the upstream, or — before the first
+/// push — not on any remote-tracking branch. Empty when there's no remote or
+/// nothing to push. Runs locally (no network), so it's cheap to poll.
+#[tauri::command]
+async fn git_unpushed_commits(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || git_unpushed_commits_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn git_unpushed_commits_blocking(path: &str) -> Result<Vec<String>, String> {
+    let has_remote = git_str(path, &["remote"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_remote {
+        return Ok(Vec::new());
+    }
+    let has_upstream = git_str(
+        path,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )
+    .is_some();
+    // With an upstream, what a push sends is `@{u}..HEAD`. Without one (the
+    // first-push case), it's every commit not already on a remote — the same
+    // set `--not --remotes` counts for the `unpushed` field.
+    let out = if has_upstream {
+        run_git(path, &["log", "--format=%s", "@{u}..HEAD"])?
+    } else {
+        run_git(path, &["log", "--format=%s", "HEAD", "--not", "--remotes"])?
+    };
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Ok(text
+        .lines()
+        .map(|l| l.to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 /// Local branch names, ordered by most-recent commit first (the same order the
@@ -780,7 +899,10 @@ fn pty_spawn(
         },
     );
 
-    // Pump PTY output to the frontend on a dedicated thread.
+    // Pump PTY output to the frontend on a dedicated thread. Target the main
+    // webview only — a bare `emit` broadcasts every chunk to ALL webviews,
+    // including the embedded browser tabs' external pages, which can't use the
+    // events and just burn renderer CPU evaluating them.
     let app_handle = app.clone();
     let mut reader = reader;
     thread::spawn(move || {
@@ -789,14 +911,17 @@ fn pty_spawn(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if app_handle.emit(&output_event, buf[..n].to_vec()).is_err() {
+                    if app_handle
+                        .emit_to("main", &output_event, buf[..n].to_vec())
+                        .is_err()
+                    {
                         break;
                     }
                 }
                 Err(_) => break,
             }
         }
-        let _ = app_handle.emit(&exit_event, ());
+        let _ = app_handle.emit_to("main", &exit_event, ());
     });
 
     Ok(())
@@ -1238,6 +1363,53 @@ async fn claude_usage() -> ClaudeUsage {
         .unwrap_or_default()
 }
 
+/// Sink for frontend `window.onerror` / `unhandledrejection` reports so JS
+/// failures land in the same log file as the Rust side (the webview console
+/// is gone once the app dies, the log file isn't).
+#[tauri::command]
+fn frontend_log(level: String, message: String) {
+    match level.as_str() {
+        "error" => log::error!(target: "frontend", "{message}"),
+        "warn" => log::warn!(target: "frontend", "{message}"),
+        _ => log::info!(target: "frontend", "{message}"),
+    }
+}
+
+/// Install a panic hook that appends every Rust panic (message + backtrace)
+/// to `crash.log` in the app log dir before the process dies. Panics on the
+/// main thread kill the app with nothing in the regular log — this file is
+/// the post-mortem. Written raw (not via `log`) so it works even if the
+/// logger itself is wedged.
+fn install_panic_hook(log_dir: std::path::PathBuf) {
+    let _ = std::fs::create_dir_all(&log_dir);
+    let crash_path = log_dir.join("crash.log");
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let entry = format!(
+            "==== panic at unix:{ts} on thread '{thread}' ====\n{info}\nbacktrace:\n{backtrace}\n\n"
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&crash_path)
+        {
+            let _ = f.write_all(entry.as_bytes());
+        }
+        // Also try the regular log; harmless if the logger is already dead.
+        log::error!("PANIC on thread '{thread}': {info}");
+        default_hook(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1257,6 +1429,9 @@ pub fn run() {
             git_unstage,
             git_commit,
             git_push,
+            git_pull,
+            git_fetch,
+            git_unpushed_commits,
             git_branches,
             git_checkout,
             read_state,
@@ -1276,16 +1451,40 @@ pub fn run() {
             browser_hide,
             browser_close,
             browser_get_url,
-            claude_usage
+            claude_usage,
+            frontend_log
         ])
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+        // Lifecycle breadcrumbs: a crash leaves no CloseRequested before the
+        // process ends, a normal quit logs one — that distinction is the first
+        // thing to check in the log after an unexpected exit.
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { .. } => {
+                log::info!("window '{}' close requested (user quit)", window.label());
             }
+            tauri::WindowEvent::Destroyed => {
+                log::info!("window '{}' destroyed", window.label());
+            }
+            _ => {}
+        })
+        .setup(|app| {
+            // File logging in ALL builds (it was debug-only, so released-build
+            // crashes left no trace). Default targets: stdout, the log dir
+            // (…\AppData\Local\com.meridian.ade\logs), and the webview console.
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            install_panic_hook(log_dir);
+            log::info!(
+                "Meridian v{} started (debug={})",
+                env!("CARGO_PKG_VERSION"),
+                cfg!(debug_assertions)
+            );
             Ok(())
         })
         .run(tauri::generate_context!())

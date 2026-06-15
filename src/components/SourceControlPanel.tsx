@@ -222,13 +222,17 @@ export function SourceControlPanel({
 
   const hasStaged = staged.length > 0;
   const detached = status?.detached ?? false;
-  // Local commits that aren't on the remote: ahead of upstream, or commits on a
-  // branch that has a remote but no upstream set yet (the first-push case).
-  const unpushed =
-    !!status &&
-    !detached &&
-    (status.ahead > 0 ||
-      (status.hasCommits && status.hasRemote && !status.hasUpstream));
+  // Local commits a push would actually send. With an upstream that's `ahead`;
+  // before the first push (no upstream) it's the backend's `unpushed` count,
+  // which is also 0 when a freshly-created branch has nothing new to send — so
+  // the button doesn't offer to push when there are no commits.
+  const unpushedCount =
+    status && !detached
+      ? status.hasUpstream
+        ? status.ahead
+        : status.unpushed
+      : 0;
+  const unpushed = unpushedCount > 0;
   const mode: "commit" | "push" = hasStaged ? "commit" : unpushed ? "push" : "commit";
 
   const canCommit = hasStaged && message.trim().length > 0 && busy === null;
@@ -250,7 +254,7 @@ export function SourceControlPanel({
       : busy === "push"
         ? "Pushing…"
         : mode === "push"
-          ? "Push"
+          ? `Push ${unpushedCount} commit${unpushedCount === 1 ? "" : "s"}`
           : "Commit";
 
   return (
@@ -288,49 +292,25 @@ export function SourceControlPanel({
           <p className="px-3 py-2 text-[12px] text-fg-subtle">{error}</p>
         ) : !status ? (
           <p className="px-3 py-2 text-[12px] text-fg-faint">Loading…</p>
-        ) : staged.length === 0 && changes.length === 0 ? (
-          <p className="px-3 py-2 text-[12px] text-fg-faint">
-            No changes in the working tree.
-          </p>
         ) : (
           <>
-            {staged.length > 0 && (
-              <section>
-                <GroupHeader
-                  label="Staged Changes"
-                  count={staged.length}
-                  actionLabel="Unstage all"
-                  onAction={() => unstage(staged.map((f) => f.path))}
-                  disabled={busy !== null}
-                />
-                <div className="px-1">
-                  {staged.map((file) => (
-                    <FileRow
-                      key={file.path}
-                      file={file}
-                      code={file.index}
-                      actionIcon={<Minus size={13} strokeWidth={2} />}
-                      actionTitle="Unstage"
-                      onAction={() => unstage([file.path])}
-                      onSelect={() => onSelectFile(file.path)}
-                      disabled={busy !== null}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {changes.length > 0 && (
-              <section>
-                <GroupHeader
-                  label="Changes"
-                  count={changes.length}
-                  actionLabel="Stage all"
-                  onAction={() => stage(changes.map((f) => f.path))}
-                  disabled={busy !== null}
-                />
-                <div className="px-1">
-                  {changes.map((file) => (
+            {/* Both sections always render, even when empty, so the staged /
+                unstaged split is always visible. */}
+            <section>
+              <GroupHeader
+                label="Changes"
+                count={changes.length}
+                actionLabel="Stage all"
+                onAction={() => stage(changes.map((f) => f.path))}
+                disabled={busy !== null || changes.length === 0}
+              />
+              <div className="px-1">
+                {changes.length === 0 ? (
+                  <p className="px-2 py-1 text-[12px] text-fg-faint">
+                    No unstaged changes.
+                  </p>
+                ) : (
+                  changes.map((file) => (
                     <FileRow
                       key={file.path}
                       file={file}
@@ -341,10 +321,40 @@ export function SourceControlPanel({
                       onSelect={() => onSelectFile(file.path)}
                       disabled={busy !== null}
                     />
-                  ))}
-                </div>
-              </section>
-            )}
+                  ))
+                )}
+              </div>
+            </section>
+
+            <section>
+              <GroupHeader
+                label="Staged Changes"
+                count={staged.length}
+                actionLabel="Unstage all"
+                onAction={() => unstage(staged.map((f) => f.path))}
+                disabled={busy !== null || staged.length === 0}
+              />
+              <div className="px-1">
+                {staged.length === 0 ? (
+                  <p className="px-2 py-1 text-[12px] text-fg-faint">
+                    No staged changes.
+                  </p>
+                ) : (
+                  staged.map((file) => (
+                    <FileRow
+                      key={file.path}
+                      file={file}
+                      code={file.index}
+                      actionIcon={<Minus size={13} strokeWidth={2} />}
+                      actionTitle="Unstage"
+                      onAction={() => unstage([file.path])}
+                      onSelect={() => onSelectFile(file.path)}
+                      disabled={busy !== null}
+                    />
+                  ))
+                )}
+              </div>
+            </section>
           </>
         )}
       </div>

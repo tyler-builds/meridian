@@ -88,6 +88,8 @@ export interface GitStatus {
   hasRemote: boolean;
   /** False in a fresh repo with no commits yet. */
   hasCommits: boolean;
+  /** Local commits not on any remote — the number a push would send. */
+  unpushed: number;
 }
 
 /** Structured git status driving the Source Control panel. Rejects when the path isn't a repo. */
@@ -113,6 +115,31 @@ export function gitCommit(path: string, message: string): Promise<void> {
 /** Push the current branch, setting the upstream automatically on first push. */
 export function gitPush(path: string): Promise<void> {
   return invoke("git_push", { path });
+}
+
+/**
+ * Pull the current branch from its upstream (`git pull --no-edit`). Rejects when
+ * there's no upstream, when local changes would be overwritten, or on merge
+ * conflicts — callers should gate this on a clean working tree.
+ */
+export function gitPull(path: string): Promise<void> {
+  return invoke("git_pull", { path });
+}
+
+/**
+ * Fetch from the remote (with prune) so ahead/behind counts reflect the latest
+ * upstream, without modifying the working tree. Rejects when no remote is set.
+ */
+export function gitFetch(path: string): Promise<void> {
+  return invoke("git_fetch", { path });
+}
+
+/**
+ * Commit subjects (newest first) of the local commits a push would send.
+ * Empty when there's no remote or nothing is unpushed.
+ */
+export function gitUnpushedCommits(path: string): Promise<string[]> {
+  return invoke<string[]>("git_unpushed_commits", { path });
 }
 
 /** Write text content to a file (project root + relative path). */

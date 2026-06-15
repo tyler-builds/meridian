@@ -223,23 +223,31 @@ export function BranchSwitcher({
 
       {dirtyAction !== null && (
         <DirtyDialog
-          branch={dirtyAction.branch}
-          create={dirtyAction.create}
           onClose={() => setDirtyAction(null)}
+          message={
+            <>
+              You have uncommitted changes in this project. Commit or stash them
+              before{" "}
+              {dirtyAction.create ? "creating the new branch" : "switching to"}{" "}
+              <span className="text-fg">“{dirtyAction.branch}”</span>.
+            </>
+          }
         />
       )}
     </>
   );
 }
 
-/** Blocks switching/creating while the working tree has uncommitted changes. */
-function DirtyDialog({
-  branch,
-  create,
+/**
+ * Blocks an action that can't run while the working tree has uncommitted
+ * changes (branch switch/create, pull). `message` describes the blocked action;
+ * dismissing it returns to the popup so the user can commit or stash first.
+ */
+export function DirtyDialog({
+  message,
   onClose,
 }: {
-  branch: string;
-  create: boolean;
+  message: React.ReactNode;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -264,9 +272,7 @@ function DirtyDialog({
       >
         <h2 className="text-sm font-medium text-fg">Uncommitted changes</h2>
         <p className="mt-2 text-[13px] leading-relaxed text-fg-subtle">
-          You have uncommitted changes in this project. Commit or stash them
-          before {create ? "creating the new branch" : "switching to"}{" "}
-          <span className="text-fg">“{branch}”</span>.
+          {message}
         </p>
         <div className="mt-4 flex justify-end">
           <button

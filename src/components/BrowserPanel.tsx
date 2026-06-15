@@ -95,6 +95,7 @@ export function BrowserPanel({
     if (!el) return;
 
     let disposed = false;
+    let waitRo: ResizeObserver | undefined;
     let unlistenNav: (() => void) | undefined;
     let unlistenTitle: (() => void) | undefined;
     let unlistenNewTab: (() => void) | undefined;
@@ -123,7 +124,26 @@ export function BrowserPanel({
         unlistenNewTab?.();
         return;
       }
-      const r = el.getBoundingClientRect();
+      // A hidden placeholder (inactive main tab or background project, both
+      // kept mounted with display:none) measures 0×0, and WebView2 rejects
+      // zero-size bounds (E_INVALIDARG "The parameter is incorrect"), so wait
+      // for the first real layout before creating the webview.
+      const r = await new Promise<DOMRect>((resolve) => {
+        const initial = el.getBoundingClientRect();
+        if (initial.width > 0 && initial.height > 0) {
+          resolve(initial);
+          return;
+        }
+        waitRo = new ResizeObserver(() => {
+          const next = el.getBoundingClientRect();
+          if (next.width > 0 && next.height > 0) {
+            waitRo?.disconnect();
+            resolve(next);
+          }
+        });
+        waitRo.observe(el);
+      });
+      if (disposed) return;
       try {
         await browserCreate(id, initialUrl, r.left, r.top, r.width, r.height);
         if (disposed) {
@@ -141,6 +161,7 @@ export function BrowserPanel({
 
     return () => {
       disposed = true;
+      waitRo?.disconnect();
       unlistenNav?.();
       unlistenTitle?.();
       unlistenNewTab?.();
