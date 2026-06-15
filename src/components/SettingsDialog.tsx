@@ -1,7 +1,18 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Code2, GitCompare, Terminal, X, type LucideIcon } from "lucide-react";
+import {
+  Cable,
+  Check,
+  Code2,
+  GitCompare,
+  Loader2,
+  Terminal,
+  TriangleAlert,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 
 import { useSettings } from "@/lib/settings";
+import { openExternal } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -12,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-type SectionId = "terminal" | "editor" | "diff";
+type SectionId = "terminal" | "editor" | "diff" | "connections";
 
 const SECTIONS: {
   id: SectionId;
@@ -22,6 +33,7 @@ const SECTIONS: {
   { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "editor", label: "Code Editor", icon: Code2 },
   { id: "diff", label: "Diff Viewer", icon: GitCompare },
+  { id: "connections", label: "Connections", icon: Cable },
 ];
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -85,8 +97,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <TerminalSection />
             ) : section === "editor" ? (
               <EditorSection />
-            ) : (
+            ) : section === "diff" ? (
               <DiffSection />
+            ) : (
+              <ConnectionsSection />
             )}
           </div>
         </div>
@@ -219,5 +233,134 @@ function DiffSection() {
         />
       </SettingRow>
     </>
+  );
+}
+
+/**
+ * Connections section — currently a single Jira card. Meridian ships its own
+ * Atlassian OAuth app (credentials baked in at build time), so the user just
+ * clicks Connect and consents in the browser; there's nothing to configure
+ * here. Status reflects connected / not connected / reconnect-required straight
+ * from the backend.
+ */
+function ConnectionsSection() {
+  const { jira, jiraConnecting, connectJira, disconnectJira } = useSettings();
+
+  const connected = jira?.connected ?? false;
+  const needsReconnect = jira?.needsReconnect ?? false;
+  const hasApp = jira?.hasApp ?? false;
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-border bg-bg p-4">
+        {/* Header: title + status pill */}
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-col">
+            <span className="text-[13px] font-medium text-fg">Jira</span>
+            <span className="text-xs text-fg-subtle">
+              Turn an issue key into a branch name from the branch switcher.
+            </span>
+          </div>
+          <StatusPill connected={connected} needsReconnect={needsReconnect} />
+        </div>
+
+        {connected ? (
+          <div className="mt-4 space-y-3">
+            <div className="text-[13px] text-fg-subtle">
+              {jira?.accountName ? (
+                <>
+                  Connected as{" "}
+                  <span className="text-fg">{jira.accountName}</span>
+                </>
+              ) : (
+                "Connected"
+              )}
+              {jira?.siteUrl && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    onClick={() => void openExternal(jira.siteUrl as string)}
+                    className="text-accent hover:underline"
+                  >
+                    {jira.siteUrl.replace(/^https?:\/\//, "")}
+                  </button>
+                </>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => void disconnectJira()}
+              className="h-8 rounded-md border border-border px-3 text-[13px] text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+            >
+              Disconnect
+            </button>
+          </div>
+        ) : hasApp ? (
+          <div className="mt-4 space-y-3">
+            {needsReconnect && (
+              <p className="text-[12px] leading-relaxed text-amber-400">
+                Your authorization expired or was revoked. Reconnect to keep
+                using Jira features.
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={() => void connectJira()}
+              disabled={jiraConnecting}
+              className="flex h-8 items-center gap-2 rounded-md bg-fg px-3 text-[13px] font-medium text-bg transition-colors hover:bg-fg/90 active:bg-fg/80 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {jiraConnecting && (
+                <Loader2 size={13} strokeWidth={2} className="animate-spin" />
+              )}
+              {jiraConnecting
+                ? "Waiting for browser…"
+                : needsReconnect
+                  ? "Reconnect Jira"
+                  : "Connect Jira"}
+            </button>
+            {jira?.error && (
+              <p className="text-[12px] leading-relaxed text-red-400">
+                {jira.error}
+              </p>
+            )}
+          </div>
+        ) : (
+          <p className="mt-4 text-[12px] leading-relaxed text-fg-faint">
+            This build of Meridian isn’t configured with Jira credentials.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatusPill({
+  connected,
+  needsReconnect,
+}: {
+  connected: boolean;
+  needsReconnect: boolean;
+}) {
+  if (connected) {
+    return (
+      <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-400">
+        <Check size={11} strokeWidth={2.5} />
+        Connected
+      </span>
+    );
+  }
+  if (needsReconnect) {
+    return (
+      <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-400">
+        <TriangleAlert size={11} strokeWidth={2.5} />
+        Reconnect required
+      </span>
+    );
+  }
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-bg-hover px-2.5 py-1 text-[11px] font-medium text-fg-subtle">
+      Not connected
+    </span>
   );
 }

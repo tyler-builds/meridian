@@ -9,6 +9,8 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
 
+mod jira;
+
 /// A single running pseudo-terminal session.
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -1414,9 +1416,11 @@ fn install_panic_hook(log_dir: std::path::PathBuf) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(PtyManager::default())
         .manage(BrowserManager::default())
+        .manage(jira::JiraState::default())
         .invoke_handler(tauri::generate_handler![
             read_project_tree,
             read_file_text,
@@ -1452,7 +1456,12 @@ pub fn run() {
             browser_close,
             browser_get_url,
             claude_usage,
-            frontend_log
+            frontend_log,
+            jira::jira_status,
+            jira::jira_connect,
+            jira::jira_disconnect,
+            jira::jira_resolve_branch,
+            jira::open_external
         ])
         // Lifecycle breadcrumbs: a crash leaves no CloseRequested before the
         // process ends, a normal quit logs one — that distinction is the first

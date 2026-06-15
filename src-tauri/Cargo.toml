@@ -26,10 +26,19 @@ log = "0.4"
 tauri = { version = "2.7.0", features = ["unstable"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2.7.1"
+# Opens URLs/paths with the OS default handler (ShellExecute on Windows). Used
+# to launch the system browser for the Jira OAuth consent flow and external
+# links — correctly resolves the default browser and preserves query strings.
+tauri-plugin-opener = "2"
 portable-pty = "0.9.0"
 which = "8.0.3"
 tauri-plugin-window-state = "2.4.1"
 base64 = "0.22.1"
 # Lightweight blocking HTTP client (bundled rustls) for the authenticated
-# Claude usage endpoint. No async runtime needed; called via spawn_blocking.
+# Claude usage endpoint and the Jira REST/OAuth calls. No async runtime needed;
+# called via spawn_blocking.
 ureq = { version = "2", features = ["tls"] }
+# OS-native secret store for the Jira OAuth refresh token + client secret
+# (Windows Credential Manager / macOS Keychain / Linux secret-service), so
+# credentials never sit in a plaintext app-data file.
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }

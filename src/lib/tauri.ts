@@ -177,6 +177,65 @@ export function claudeUsage(): Promise<ClaudeUsage> {
   return invoke<ClaudeUsage>("claude_usage");
 }
 
+// --- Jira integration ---
+
+/** Connection state for the Jira card in Settings → Connections. */
+export interface JiraStatus {
+  /** Authorized and ready to make API calls. */
+  connected: boolean;
+  /** Was connected, but the refresh token expired/was revoked — re-auth needed. */
+  needsReconnect: boolean;
+  /** A client id + secret have been saved (an app to connect *with*). */
+  hasApp: boolean;
+  /** The connected site's base URL, e.g. "https://acme.atlassian.net". */
+  siteUrl: string | null;
+  /** Display name of the authorized account. */
+  accountName: string | null;
+  /** Last connect error, if any (only set by the connect flow). */
+  error: string | null;
+}
+
+/** Read the current Jira connection status (reads metadata + keychain). */
+export function jiraStatus(): Promise<JiraStatus> {
+  return invoke<JiraStatus>("jira_status");
+}
+
+/**
+ * Run the OAuth 3LO loopback flow: opens the system browser to Atlassian's
+ * consent screen, catches the callback locally, exchanges + stores tokens.
+ * Resolves with the resulting status; connect failures come back in `error`.
+ */
+export function jiraConnect(): Promise<JiraStatus> {
+  return invoke<JiraStatus>("jira_connect");
+}
+
+/** Forget the authorization (clears the refresh token), keeping the saved app. */
+export function jiraDisconnect(): Promise<JiraStatus> {
+  return invoke<JiraStatus>("jira_disconnect");
+}
+
+/** A Jira issue key resolved to its summary and the branch name to create. */
+export interface JiraBranch {
+  /** Normalized issue key, e.g. "OWS-12345". */
+  key: string;
+  summary: string;
+  /** e.g. "OWS-12345-fix-the-login-timeout". */
+  branch: string;
+}
+
+/**
+ * Look up an issue's summary and build its Jira-style branch name. Rejects when
+ * the key is malformed, the issue isn't found, or Jira isn't connected.
+ */
+export function jiraResolveBranch(issueKey: string): Promise<JiraBranch> {
+  return invoke<JiraBranch>("jira_resolve_branch", { issueKey });
+}
+
+/** Open an http(s) URL in the system browser. */
+export function openExternal(url: string): Promise<void> {
+  return invoke("open_external", { url });
+}
+
 // --- Shells ---
 
 export interface ShellInfo {
