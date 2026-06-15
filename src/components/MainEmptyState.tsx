@@ -1,4 +1,4 @@
-import { GitBranch, Globe, Terminal } from "lucide-react";
+import { GitBranch, Globe, NotebookPen, Terminal } from "lucide-react";
 
 import { ClaudeIcon } from "@/components/ClaudeIcon";
 
@@ -8,11 +8,13 @@ export function MainEmptyState({
   onNewBrowser,
   onNewClaude,
   onNewGit,
+  onNewNotes,
 }: {
   onNewTerminal: () => void;
   onNewBrowser: () => void;
   onNewClaude: () => void;
   onNewGit: () => void;
+  onNewNotes: () => void;
 }) {
   const options = [
     {
@@ -29,6 +31,11 @@ export function MainEmptyState({
       label: "Git",
       icon: <GitBranch size={16} strokeWidth={1.8} />,
       onClick: onNewGit,
+    },
+    {
+      label: "Notes",
+      icon: <NotebookPen size={16} strokeWidth={1.8} />,
+      onClick: onNewNotes,
     },
     {
       label: "Claude",

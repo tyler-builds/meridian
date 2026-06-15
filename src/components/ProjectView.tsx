@@ -15,6 +15,7 @@ import { TerminalSplit } from "@/components/TerminalSplit";
 import { EditorPanel } from "@/components/EditorPanel";
 import { BrowserPanel } from "@/components/BrowserPanel";
 import { GitPanel } from "@/components/GitPanel";
+import { NotesPanel } from "@/components/NotesPanel";
 import { MainTabBar } from "@/components/MainTabBar";
 import { MainEmptyState } from "@/components/MainEmptyState";
 import {
@@ -37,6 +38,7 @@ export function ProjectView({
   onNewBrowser,
   onNewClaude,
   onNewGit,
+  onNewNotes,
   onCloseMainTab,
   onReorderMainTab,
   onSelectMainTab,
@@ -61,6 +63,7 @@ export function ProjectView({
   onNewBrowser: (projectId: string) => void;
   onNewClaude: (projectId: string) => void;
   onNewGit: (projectId: string) => void;
+  onNewNotes: (projectId: string) => void;
   onCloseMainTab: (projectId: string, mainTabId: string) => void;
   onReorderMainTab: (projectId: string, fromId: string, toId: string) => void;
   onSelectMainTab: (projectId: string, mainTabId: string) => void;
@@ -193,6 +196,7 @@ export function ProjectView({
             onNewBrowser={() => onNewBrowser(tab.id)}
             onNewClaude={() => onNewClaude(tab.id)}
             onNewGit={() => onNewGit(tab.id)}
+            onNewNotes={() => onNewNotes(tab.id)}
           />
 
           {activeTerminal && (
@@ -258,6 +262,7 @@ export function ProjectView({
               onNewBrowser={() => onNewBrowser(tab.id)}
               onNewClaude={() => onNewClaude(tab.id)}
               onNewGit={() => onNewGit(tab.id)}
+              onNewNotes={() => onNewNotes(tab.id)}
             />
           ) : (
             <>
@@ -337,6 +342,26 @@ export function ProjectView({
                     <GitPanel
                       root={tab.path}
                       active={active && tab.activeMainTabId === t.id}
+                    />
+                  </div>
+                ))}
+
+              {/* Notes tabs: a per-repo note pad. Kept mounted so the caret
+                  and scroll position survive tab switches; content autosaves
+                  per project path independent of the session. */}
+              {tab.mainTabs
+                .filter((t) => t.kind === "notes")
+                .map((t) => (
+                  <div
+                    key={t.id}
+                    className={cn(
+                      "absolute inset-0",
+                      tab.activeMainTabId === t.id ? "block" : "hidden",
+                    )}
+                  >
+                    <NotesPanel
+                      root={tab.path}
+                      onOpenUrl={(url) => onOpenBrowserUrl(tab.id, url)}
                     />
                   </div>
                 ))}

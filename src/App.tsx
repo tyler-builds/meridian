@@ -234,6 +234,27 @@ export default function App() {
     [updateProject],
   );
 
+  const newNotes = useCallback(
+    (projectId: string) => {
+      updateProject(projectId, (t) => {
+        // One notes tab per project; focus the existing one if present.
+        const existing = t.mainTabs.find((m) => m.kind === "notes");
+        if (existing) return { ...t, activeMainTabId: existing.id };
+        const newTab: MainTab = {
+          id: crypto.randomUUID(),
+          kind: "notes",
+          title: "Notes",
+        };
+        return {
+          ...t,
+          mainTabs: [...t.mainTabs, newTab],
+          activeMainTabId: newTab.id,
+        };
+      });
+    },
+    [updateProject],
+  );
+
   const newBrowser = useCallback(
     (projectId: string) => {
       updateProject(projectId, (t) => {
@@ -678,6 +699,7 @@ export default function App() {
                   onNewBrowser={newBrowser}
                   onNewClaude={newClaude}
                   onNewGit={newGit}
+                  onNewNotes={newNotes}
                   onCloseMainTab={closeMainTab}
                   onReorderMainTab={reorderMainTab}
                   onSelectMainTab={selectMainTab}
