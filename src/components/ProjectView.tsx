@@ -49,6 +49,7 @@ export function ProjectView({
   onSplitPane,
   onClosePane,
   onFocusPane,
+  onClaudeAttention,
   onResizePane,
 }: {
   tab: ProjectTab;
@@ -83,6 +84,11 @@ export function ProjectView({
   ) => void;
   onClosePane: (projectId: string, mainTabId: string, paneId: string) => void;
   onFocusPane: (projectId: string, mainTabId: string, paneId: string) => void;
+  onClaudeAttention: (
+    projectId: string,
+    mainTabId: string,
+    paneId: string,
+  ) => void;
   onResizePane: (
     projectId: string,
     mainTabId: string,
@@ -289,6 +295,9 @@ export function ProjectView({
                         }
                         onClosePane={(paneId) =>
                           onClosePane(tab.id, t.id, paneId)
+                        }
+                        onClaudeAttention={(paneId) =>
+                          onClaudeAttention(tab.id, t.id, paneId)
                         }
                         onResize={(splitId, sizes) =>
                           onResizePane(tab.id, t.id, splitId, sizes)

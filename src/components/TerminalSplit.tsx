@@ -20,6 +20,7 @@ export function TerminalSplit({
   initialCommands,
   onFocusPane,
   onClosePane,
+  onClaudeAttention,
   onResize,
 }: {
   tree: PaneNode;
@@ -30,6 +31,8 @@ export function TerminalSplit({
   initialCommands?: Record<string, string>;
   onFocusPane: (paneId: string) => void;
   onClosePane: (paneId: string) => void;
+  /** Claude in this pane finished its turn / started waiting on the user. */
+  onClaudeAttention: (paneId: string) => void;
   onResize: (splitId: string, sizes: number[]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -109,6 +112,7 @@ export function TerminalSplit({
               shell={shell}
               initialCommand={initialCommands?.[id]}
               onExit={() => onClosePane(id)}
+              onClaudeAttention={() => onClaudeAttention(id)}
             />
           </div>
         );

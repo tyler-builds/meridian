@@ -419,6 +419,35 @@ export default function App() {
     [],
   );
 
+  // Claude (in some terminal of `projectId`) started waiting on the user. Flag
+  // the project tab for attention, but only when it isn't the one being viewed —
+  // if you're already on it, there's nothing to alert. Read the active tab via a
+  // ref so the callback stays stable as you switch tabs.
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  const claudeAttention = useCallback(
+    (projectId: string) => {
+      if (projectId === activeTabIdRef.current) return;
+      updateProject(projectId, (t) =>
+        t.attention ? t : { ...t, attention: true },
+      );
+    },
+    [updateProject],
+  );
+
+  // Viewing a tab clears its attention flag (covers every path to activation:
+  // clicking the tab, opening a project, closing the neighbor that was active).
+  useEffect(() => {
+    if (activeTabId == null) return;
+    setTabs((prev) =>
+      prev.some((t) => t.id === activeTabId && t.attention)
+        ? prev.map((t) =>
+            t.id === activeTabId ? { ...t, attention: false } : t,
+          )
+        : prev,
+    );
+  }, [activeTabId]);
+
   const resizePane = useCallback(
     (
       projectId: string,
@@ -710,6 +739,7 @@ export default function App() {
                   onSplitPane={splitPane}
                   onClosePane={closePane}
                   onFocusPane={focusPane}
+                  onClaudeAttention={claudeAttention}
                   onResizePane={resizePane}
                 />
               </ErrorBoundary>

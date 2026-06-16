@@ -47,6 +47,7 @@ export function TerminalPanel({
   shell,
   initialCommand,
   onExit,
+  onClaudeAttention,
 }: {
   cwd: string;
   shell: string;
@@ -54,10 +55,18 @@ export function TerminalPanel({
   initialCommand?: string;
   /** Called when the shell process exits on its own (e.g. user typed `exit`). */
   onExit?: () => void;
+  /**
+   * Called when Claude Code (running in this terminal) finishes its turn and is
+   * waiting on the user — detected by its title spinner stopping. Fires on that
+   * transition, not continuously.
+   */
+  onClaudeAttention: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const onClaudeAttentionRef = useRef(onClaudeAttention);
+  onClaudeAttentionRef.current = onClaudeAttention;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -157,6 +166,25 @@ export function TerminalPanel({
         return false; // skip xterm; browser performs the paste
       }
       return true;
+    });
+
+    // Detect when Claude Code (running here) finishes a turn and is waiting on
+    // the user. Claude reflects its state in the terminal title: an animated
+    // braille spinner frame (U+2800-U+28FF) prefixes "Claude Code" while it's
+    // working, and a static glyph when idle/awaiting input. We fire on the
+    // transition from working to not-working (the spinner stopping), which is
+    // exactly "Claude is done / now needs you". Titles without "Claude Code"
+    // (the cmd.exe and launch titles) are ignored, so nothing else trips it.
+    let claudeBusy = false;
+    term.onTitleChange((title) => {
+      if (!title.includes("Claude Code")) return;
+      const busy = /[⠀-⣿]/.test(title); // braille spinner frame = working
+      if (busy) {
+        claudeBusy = true;
+      } else if (claudeBusy) {
+        claudeBusy = false;
+        onClaudeAttentionRef.current();
+      }
     });
 
     // GPU renderer: draws box-drawing/block characters programmatically so

@@ -53,4 +53,10 @@ export interface ProjectTab {
   mainTabs: MainTab[];
   /** Active main-panel tab, or null when none are open (empty state). */
   activeMainTabId: string | null;
+  /**
+   * Claude (running in one of this project's terminals) finished its turn or is
+   * awaiting input while this tab wasn't the active one. Shown as a dot on the
+   * tab and cleared when the tab is viewed. Ephemeral — not persisted.
+   */
+  attention?: boolean;
 }
