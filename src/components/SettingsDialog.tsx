@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { useSettings } from "@/lib/settings";
+import { EDITOR_THEMES } from "@/lib/monaco";
 import { openExternal } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
@@ -178,14 +179,54 @@ function TerminalSection() {
 }
 
 function EditorSection() {
-  const { showMinimap, setShowMinimap } = useSettings();
+  const {
+    showMinimap,
+    setShowMinimap,
+    formatOnSave,
+    setFormatOnSave,
+    editorTheme,
+    setEditorTheme,
+    lspEnabled,
+    setLspEnabled,
+  } = useSettings();
   return (
-    <SettingRow
-      title="Show minimap"
-      description="Display the code overview on the right edge of the editor."
-    >
-      <Switch checked={showMinimap} onCheckedChange={setShowMinimap} />
-    </SettingRow>
+    <>
+      <SettingRow
+        title="Theme"
+        description="Color theme for the code editor."
+      >
+        <Select value={editorTheme} onValueChange={setEditorTheme}>
+          <SelectTrigger className="w-52">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {EDITOR_THEMES.map((theme) => (
+              <SelectItem key={theme.id} value={theme.id}>
+                {theme.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </SettingRow>
+      <SettingRow
+        title="Format on save"
+        description="Format supported files (JS, TS, JSON, CSS, HTML, Markdown, YAML) on save, using the project's own Prettier and config when available."
+      >
+        <Switch checked={formatOnSave} onCheckedChange={setFormatOnSave} />
+      </SettingRow>
+      <SettingRow
+        title="Show minimap"
+        description="Display the code overview on the right edge of the editor."
+      >
+        <Switch checked={showMinimap} onCheckedChange={setShowMinimap} />
+      </SettingRow>
+      <SettingRow
+        title="Language server"
+        description="Project-wide types, errors, and IntelliSense for TypeScript/JavaScript (uses the project's own typescript-language-server when available)."
+      >
+        <Switch checked={lspEnabled} onCheckedChange={setLspEnabled} />
+      </SettingRow>
+    </>
   );
 }
 

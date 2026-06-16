@@ -36,6 +36,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../node_modules/typescript-language-server": "node_modules/typescript-language-server",
+      "../node_modules/typescript": "node_modules/typescript"
+    }
   }
 }

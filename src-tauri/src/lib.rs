@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 
@@ -22,6 +23,18 @@ struct PtySession {
 #[derive(Default)]
 struct PtyManager {
     sessions: Mutex<HashMap<String, PtySession>>,
+}
+
+/// One running language-server child process (keyed by project root path).
+struct LspSession {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+}
+
+/// Holds every live language server keyed by project root path.
+#[derive(Default)]
+struct LspManager {
+    sessions: Mutex<HashMap<String, LspSession>>,
 }
 
 const TREE_IGNORE: [&str; 8] = [
@@ -103,6 +116,176 @@ fn write_file_text(root: String, rel: String, content: String) -> Result<(), Str
     let mut path = std::path::PathBuf::from(&root);
     path.push(&rel);
     std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+// --- Prettier (project-local) ---
+//
+// Format-on-save and the editor's Format Document command prefer the project's
+// *own* installed Prettier so every config form is honored exactly as the
+// project expects (JS/TS configs, plugins, `extends`, overrides, .prettierignore
+// — none of which the bundled in-app formatter can do). When no local Prettier
+// is found, the command reports `source: "none"` and the frontend falls back to
+// the bundled standalone Prettier plus its own config resolver.
+
+#[derive(serde::Serialize)]
+struct PrettierResult {
+    /// Formatted text, or null when no local Prettier could be run.
+    formatted: Option<String>,
+    /// "local" when the project's Prettier produced the output, else "none".
+    source: String,
+}
+
+/// One config file found while walking up from the formatted file's directory.
+#[derive(serde::Serialize)]
+struct PrettierConfigFile {
+    /// Path relative to the project root (POSIX separators).
+    rel: String,
+    contents: String,
+}
+
+/// Locate the project's Prettier entry script (`bin/prettier.cjs`) by walking up
+/// from the file's directory, mirroring Node's `node_modules` resolution so a
+/// monorepo's hoisted Prettier is found too. Bounded to avoid runaway walks.
+fn find_local_prettier(start_dir: &Path) -> Option<PathBuf> {
+    let mut dir = Some(start_dir);
+    let mut hops = 0;
+    while let Some(d) = dir {
+        hops += 1;
+        if hops > 64 {
+            break;
+        }
+        for entry in ["bin/prettier.cjs", "bin/prettier.js"] {
+            let candidate = d.join("node_modules").join("prettier").join(entry);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// Format `content` as if it were the file at `path`, using the project's local
+/// Prettier via `--stdin-filepath` (so Prettier resolves config, parser, and
+/// ignore rules from that path). Rejects with Prettier's stderr on a parse error
+/// so the caller can save the file unchanged.
+#[tauri::command]
+async fn prettier_format(path: String, content: String) -> Result<PrettierResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let file_path = PathBuf::from(&path);
+        let file_dir = file_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+        let Some(entry) = find_local_prettier(&file_dir) else {
+            return Ok(PrettierResult {
+                formatted: None,
+                source: "none".to_string(),
+            });
+        };
+
+        let spawned = Command::new("node")
+            .arg(&entry)
+            .arg("--stdin-filepath")
+            .arg(&file_path)
+            .current_dir(&file_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+
+        // Node missing from PATH (or unlaunchable) is not fatal — fall back to
+        // the bundled formatter rather than surfacing an error.
+        let Ok(mut child) = spawned else {
+            return Ok(PrettierResult {
+                formatted: None,
+                source: "none".to_string(),
+            });
+        };
+
+        // Write stdin on a separate thread so a large formatted result filling
+        // the stdout pipe can't deadlock us while we're still writing stdin.
+        if let Some(mut stdin) = child.stdin.take() {
+            thread::spawn(move || {
+                let _ = stdin.write_all(content.as_bytes());
+                // `stdin` drops here, closing the pipe so Prettier can finish.
+            });
+        }
+
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        if output.status.success() {
+            let formatted = String::from_utf8(output.stdout)
+                .map_err(|_| "Prettier returned non-UTF-8 output".to_string())?;
+            Ok(PrettierResult {
+                formatted: Some(formatted),
+                source: "local".to_string(),
+            })
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if err.is_empty() {
+                "Prettier failed".to_string()
+            } else {
+                err
+            })
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Collect declarative Prettier config files (nearest first) by walking up from
+/// the formatted file's directory to the project root. Used only by the bundled
+/// fallback formatter; the frontend parses and merges them. JS/TS configs are
+/// intentionally omitted — they can't be evaluated without the project's
+/// Prettier, which the fallback path is precisely the absence of.
+#[tauri::command]
+fn read_prettier_config_files(root: String, rel: String) -> Result<Vec<PrettierConfigFile>, String> {
+    const NAMES: [&str; 6] = [
+        "package.json",
+        ".prettierrc",
+        ".prettierrc.json",
+        ".prettierrc.json5",
+        ".prettierrc.yaml",
+        ".prettierrc.yml",
+    ];
+    const MAX_CONFIG_BYTES: u64 = 256 * 1024;
+
+    let root_path = PathBuf::from(&root);
+    let mut start = root_path.clone();
+    start.push(&rel);
+    let start_dir = start.parent().unwrap_or(&root_path).to_path_buf();
+
+    let mut out = Vec::new();
+    let mut dir = Some(start_dir.as_path());
+    let mut hops = 0;
+    while let Some(d) = dir {
+        hops += 1;
+        if hops > 64 {
+            break;
+        }
+        for name in NAMES {
+            let p = d.join(name);
+            let Ok(meta) = std::fs::metadata(&p) else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&p) {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    if let Ok(relp) = p.strip_prefix(&root_path) {
+                        out.push(PrettierConfigFile {
+                            rel: relp.to_string_lossy().replace('\\', "/"),
+                            contents: text,
+                        });
+                    }
+                }
+            }
+        }
+        if d == root_path {
+            break;
+        }
+        dir = d.parent();
+    }
+    Ok(out)
 }
 
 // --- Project favicon (mirrors pingdotgg/t3code's ProjectFaviconResolver) ---
@@ -967,6 +1150,235 @@ fn pty_kill(state: State<PtyManager>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+// --- Language server (LSP) ---
+//
+// One `typescript-language-server --stdio` process per project root, run via the
+// system `node` (the same Node the Prettier integration relies on). The Rust side
+// owns the LSP `Content-Length` framing: it parses framed messages off stdout and
+// emits each complete JSON message as a string on `lsp://message/{root}`, and on
+// `lsp_send` it prepends the header before writing to stdin. The frontend speaks
+// plain JSON-RPC and never deals with framing. Mirrors the PTY lifecycle.
+
+/// Strip Windows' `\\?\` verbatim (extended-length) prefix from a path. Node's
+/// module loader can't parse `\\?\C:\…` (it misreads the drive and fails), and
+/// `resource_dir()` hands back verbatim paths, so normalize before spawning.
+/// A no-op on non-verbatim paths and non-Windows platforms.
+fn denormalize(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        s.into_owned()
+    }
+}
+
+/// `…/node_modules/typescript-language-server/lib/cli.mjs` under `base`.
+fn tls_entry(base: &Path) -> PathBuf {
+    base.join("node_modules")
+        .join("typescript-language-server")
+        .join("lib")
+        .join("cli.mjs")
+}
+
+/// Resolve the language-server entry script. Order:
+///  1. The project's own install (walking up, like `find_local_prettier`) — so a
+///     project that pins a specific version gets it.
+///  2. The copy bundled with the app as a resource (packaged builds).
+///  3. The app's own `node_modules` next to the crate (dev builds) — so it works
+///     in `tauri dev` for any project, not just the Meridian repo itself.
+/// In every case the server is run with `cwd` = the project root, so it still
+/// resolves the project's `tsconfig` and installed `typescript` from disk.
+fn find_language_server(root: &Path, app: &AppHandle) -> Option<PathBuf> {
+    // 1. Project-local (and monorepo-hoisted) install.
+    let mut dir = Some(root);
+    let mut hops = 0;
+    while let Some(d) = dir {
+        hops += 1;
+        if hops > 64 {
+            break;
+        }
+        let candidate = tls_entry(d);
+        if candidate.is_file() {
+            log::info!("LSP: using project-local server {}", candidate.display());
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    // 2. Bundled fallback shipped as an app resource (packaged builds).
+    if let Ok(res) = app.path().resource_dir() {
+        let bundled = tls_entry(&res);
+        if bundled.is_file() {
+            log::info!("LSP: using bundled server {}", bundled.display());
+            return Some(bundled);
+        }
+    }
+    // 3. Dev fallback: the app's own node_modules beside the crate. The baked-in
+    //    path won't exist on a user's machine in a packaged build, so this only
+    //    resolves in `tauri dev`.
+    if let Some(repo) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+        let dev = tls_entry(repo);
+        if dev.is_file() {
+            log::info!("LSP: using dev server {}", dev.display());
+            return Some(dev);
+        }
+    }
+    log::warn!(
+        "LSP: no typescript-language-server found for {}",
+        root.display()
+    );
+    None
+}
+
+#[tauri::command]
+fn lsp_spawn(
+    app: AppHandle,
+    state: State<LspManager>,
+    // Opaque, event-safe id supplied by the frontend for the message/exit event
+    // names — the project root can't be used directly because Tauri event names
+    // forbid `\` and `.`, which Windows paths contain.
+    id: String,
+    root: String,
+) -> Result<(), String> {
+    // Idempotent: a client already running for this root is reused.
+    if state.sessions.lock().unwrap().contains_key(&root) {
+        return Ok(());
+    }
+
+    let server = find_language_server(Path::new(&root), &app)
+        .ok_or_else(|| "No TypeScript language server found".to_string())?;
+
+    let mut child = Command::new("node")
+        .arg(denormalize(&server))
+        .arg("--stdio")
+        .current_dir(&root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            log::warn!("LSP: failed to launch node for {root}: {e}");
+            format!("Could not launch the language server via Node: {e}")
+        })?;
+    log::info!("LSP: spawned server for {root}");
+
+    let stdout = child.stdout.take().ok_or("language server has no stdout")?;
+    let stdin = child.stdin.take().ok_or("language server has no stdin")?;
+
+    // Drain stderr so it can't fill the pipe and block the server, and so its
+    // diagnostics surface in the log.
+    if let Some(stderr) = child.stderr.take() {
+        let tag = root.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                log::warn!(target: "lsp", "[{tag}] {line}");
+            }
+        });
+    }
+
+    let msg_event = format!("lsp://message/{id}");
+    let exit_event = format!("lsp://exit/{id}");
+
+    // Register before the reader thread emits (the frontend attaches its listener
+    // before calling this, mirroring the PTY pattern).
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(root.clone(), LspSession { child, stdin });
+
+    // Parse Content-Length framed messages and relay each to the main webview.
+    let app_handle = app.clone();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        'outer: loop {
+            // Headers, terminated by a blank line.
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break 'outer, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim_end();
+                        if trimmed.is_empty() {
+                            break;
+                        }
+                        if let Some(rest) = trimmed.strip_prefix("Content-Length:") {
+                            content_length = rest.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    Err(_) => break 'outer,
+                }
+            }
+            if content_length == 0 {
+                continue;
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                break;
+            }
+            match String::from_utf8(body) {
+                Ok(text) => {
+                    if app_handle.emit_to("main", &msg_event, text).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = app_handle.emit_to("main", &exit_event, ());
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn lsp_send(state: State<LspManager>, root: String, message: String) -> Result<(), String> {
+    let mut sessions = state.sessions.lock().unwrap();
+    if let Some(session) = sessions.get_mut(&root) {
+        // Content-Length is the byte length of the UTF-8 payload.
+        let header = format!("Content-Length: {}\r\n\r\n", message.len());
+        session
+            .stdin
+            .write_all(header.as_bytes())
+            .map_err(|e| e.to_string())?;
+        session
+            .stdin
+            .write_all(message.as_bytes())
+            .map_err(|e| e.to_string())?;
+        session.stdin.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn lsp_kill(state: State<LspManager>, root: String) -> Result<(), String> {
+    if let Some(mut session) = state.sessions.lock().unwrap().remove(&root) {
+        let _ = session.child.kill();
+    }
+    Ok(())
+}
+
+/// Roots whose language-server process is actually alive right now. Probes each
+/// child with `try_wait` and drops any that have exited, so the result reflects
+/// real running processes rather than what the frontend believes it started.
+#[tauri::command]
+fn lsp_status(state: State<LspManager>) -> Vec<String> {
+    let mut sessions = state.sessions.lock().unwrap();
+    let mut alive = Vec::new();
+    sessions.retain(|root, session| match session.child.try_wait() {
+        Ok(Some(_)) => false, // process exited — drop it
+        _ => {
+            // Still running, or status indeterminate (treat as running).
+            alive.push(root.clone());
+            true
+        }
+    });
+    alive.sort();
+    alive
+}
+
 // --- Embedded browser webviews ---
 //
 // Each browser tab is a native child webview added to the main window via
@@ -1419,12 +1831,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(PtyManager::default())
+        .manage(LspManager::default())
         .manage(BrowserManager::default())
         .manage(jira::JiraState::default())
         .invoke_handler(tauri::generate_handler![
             read_project_tree,
             read_file_text,
             write_file_text,
+            prettier_format,
+            read_prettier_config_files,
             find_project_favicon,
             git_current_branch,
             git_diff,
@@ -1445,6 +1860,10 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            lsp_spawn,
+            lsp_send,
+            lsp_kill,
+            lsp_status,
             browser_create,
             browser_navigate,
             browser_reload,

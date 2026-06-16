@@ -151,6 +151,51 @@ export function writeFileText(
   return invoke("write_file_text", { root, rel, content });
 }
 
+// --- Prettier ---
+
+export interface PrettierResult {
+  /** Formatted text, or null when no project-local Prettier could be run. */
+  formatted: string | null;
+  /** "local" when the project's Prettier produced the output, else "none". */
+  source: "local" | "none";
+}
+
+/**
+ * Format `content` with the project's own installed Prettier, treating it as the
+ * file at the absolute `path` (so Prettier resolves its config, parser, and
+ * .prettierignore from there). Resolves with `source: "none"` when no local
+ * Prettier exists (caller should fall back); rejects with Prettier's message on
+ * a parse error.
+ */
+export function prettierFormatLocal(
+  path: string,
+  content: string,
+): Promise<PrettierResult> {
+  return invoke<PrettierResult>("prettier_format", { path, content });
+}
+
+/** One declarative Prettier config file discovered up the directory tree. */
+export interface PrettierConfigFile {
+  /** Path relative to the project root (POSIX separators). */
+  rel: string;
+  contents: string;
+}
+
+/**
+ * Collect declarative Prettier config files (nearest first) from the formatted
+ * file's directory up to the project root. Used by the bundled fallback
+ * formatter to honor a project's config when it has no local Prettier.
+ */
+export function readPrettierConfigFiles(
+  root: string,
+  rel: string,
+): Promise<PrettierConfigFile[]> {
+  return invoke<PrettierConfigFile[]>("read_prettier_config_files", {
+    root,
+    rel,
+  });
+}
+
 // --- Claude usage ---
 
 /** One rate-limit window's state (the same figures `/usage` shows). */
@@ -290,6 +335,63 @@ export function onPtyOutput(
 
 export function onPtyExit(id: string, cb: () => void): Promise<UnlistenFn> {
   return listen(`pty://exit/${id}`, () => cb());
+}
+
+// --- Language server (LSP) ---
+//
+// One `typescript-language-server` process per project root. The backend owns
+// the Content-Length framing, so messages cross this boundary as plain JSON-RPC
+// strings. The frontend attaches `onLspMessage`/`onLspExit` BEFORE calling
+// `lspSpawn`, the same listen-first order the PTY commands use.
+
+/**
+ * Spawn (or reuse) the language server for a project root. Rejects if none is
+ * found. `id` is an opaque, event-safe identifier the backend uses for the
+ * message/exit event names (the project path can't be — Tauri event names
+ * forbid `\` and `.`). Attach `onLspMessage(id, …)` before calling this.
+ */
+export function lspSpawn(id: string, root: string): Promise<void> {
+  return invoke("lsp_spawn", { id, root });
+}
+
+/** Send one JSON-RPC message (no framing) to the server for `root`. */
+export function lspSend(root: string, message: string): Promise<void> {
+  return invoke("lsp_send", { root, message });
+}
+
+/** Stop and forget the language server for `root`. */
+export function lspKill(root: string): Promise<void> {
+  return invoke("lsp_kill", { root });
+}
+
+/**
+ * Project roots whose language-server process is actually alive right now
+ * (probed in the backend, dead processes pruned) — the source of truth for the
+ * status bar, not an assumption from the open file.
+ */
+export function lspStatus(): Promise<string[]> {
+  return invoke<string[]>("lsp_status");
+}
+
+/** Write a line to Meridian's durable log file (mirrors main.tsx's reporter). */
+export function frontendLog(
+  level: "info" | "warn" | "error",
+  message: string,
+): Promise<void> {
+  return invoke<void>("frontend_log", { level, message }).catch(() => {});
+}
+
+/** Incoming JSON-RPC messages (complete, unframed) for the client with this id. */
+export function onLspMessage(
+  id: string,
+  cb: (message: string) => void,
+): Promise<UnlistenFn> {
+  return listen<string>(`lsp://message/${id}`, (e) => cb(e.payload));
+}
+
+/** Fired when the server process for the client with this id exits. */
+export function onLspExit(id: string, cb: () => void): Promise<UnlistenFn> {
+  return listen(`lsp://exit/${id}`, () => cb());
 }
 
 // --- Embedded browser ---

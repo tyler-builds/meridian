@@ -718,9 +718,13 @@ export default function App() {
         )}
       </div>
 
-      <StatusBar
-        projectPath={tabs.find((t) => t.id === activeTabId)?.path}
-      />
+      {(() => {
+        const at = tabs.find((t) => t.id === activeTabId);
+        const onFile =
+          at?.mainTabs.find((m) => m.id === at.activeMainTabId)?.kind ===
+          "file";
+        return <StatusBar projectPath={at?.path} onFileTab={onFile} />;
+      })()}
 
       {settingsOpen && (
         <SettingsDialog onClose={() => setSettingsOpen(false)} />

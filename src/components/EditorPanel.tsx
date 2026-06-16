@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef } from "react";
 
 import { monaco } from "@/lib/monaco";
+import { registerModelFile, unregisterModelFile } from "@/lib/format";
+import { lspManager } from "@/lib/lsp/manager";
+import { registerLspProviders, registerOpenFileHandler } from "@/lib/lsp/monacoBridge";
 import { readFileText, writeFileText } from "@/lib/tauri";
 import { useSettings } from "@/lib/settings";
+
+/** Files the TypeScript/JavaScript language server handles. */
+const LSP_FILE = /\.(tsx?|jsx?|mts|cts|mjs|cjs)$/;
 
 /**
  * A single Monaco editor instance shared across all open file tabs of a
@@ -15,13 +21,16 @@ export function EditorPanel({
   openRelPaths,
   activeRelPath,
   onDirtyChange,
+  onOpenFile,
 }: {
   root: string;
   openRelPaths: string[];
   activeRelPath: string | null;
   onDirtyChange?: (relPath: string, dirty: boolean) => void;
+  /** Open another file in this project (used for cross-file go-to-definition). */
+  onOpenFile?: (relPath: string) => void;
 }) {
-  const { showMinimap } = useSettings();
+  const { showMinimap, formatOnSave, editorTheme, lspEnabled } = useSettings();
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map());
@@ -41,6 +50,21 @@ export function EditorPanel({
   rootRef.current = root;
   const onDirtyChangeRef = useRef(onDirtyChange);
   onDirtyChangeRef.current = onDirtyChange;
+  const formatOnSaveRef = useRef(formatOnSave);
+  formatOnSaveRef.current = formatOnSave;
+  const onOpenFileRef = useRef(onOpenFile);
+  onOpenFileRef.current = onOpenFile;
+  const lspEnabledRef = useRef(lspEnabled);
+  lspEnabledRef.current = lspEnabled;
+
+  // Debounced LSP didChange timers per file, and pending go-to-definition
+  // reveals to apply once the target file's model becomes active.
+  const lspTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
+    new Map(),
+  );
+  const pendingRevealRef = useRef<
+    Map<string, monaco.IRange | monaco.IPosition>
+  >(new Map());
 
   const reportDirty = useCallback((rel: string, dirty: boolean) => {
     if (lastDirtyRef.current.get(rel) === dirty) return;
@@ -55,6 +79,18 @@ export function EditorPanel({
     // Only save real (successfully loaded) files, never error buffers.
     if (!model || !savedVersionRef.current.has(rel)) return;
     try {
+      // Format-on-save: run Monaco's formatter (Prettier) before writing. The
+      // action no-ops for languages without a formatter, and a failed format
+      // must not block the save, so swallow its errors.
+      if (formatOnSaveRef.current && editorRef.current?.getModel() === model) {
+        try {
+          await editorRef.current
+            .getAction("editor.action.formatDocument")
+            ?.run();
+        } catch {
+          /* formatting failed (e.g. syntax error); save the file as-is */
+        }
+      }
       await writeFileText(rootRef.current, rel, model.getValue());
       savedVersionRef.current.set(rel, model.getAlternativeVersionId());
       reportDirty(rel, false);
@@ -66,8 +102,10 @@ export function EditorPanel({
   // Create the editor once.
   useEffect(() => {
     if (!containerRef.current) return;
+    // Register the LSP Monaco providers (idempotent — global, once per app).
+    registerLspProviders();
     const editor = monaco.editor.create(containerRef.current, {
-      theme: "meridian-dark",
+      theme: editorTheme,
       automaticLayout: true,
       fontFamily: '"JetBrains Mono", ui-monospace, monospace',
       fontSize: 13,
@@ -77,17 +115,37 @@ export function EditorPanel({
       scrollBeyondLastLine: false,
       renderWhitespace: "selection",
       minimap: { enabled: showMinimap },
+      "semanticHighlighting.enabled": true,
       padding: { top: 8 },
     });
     editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       void saveActive();
     });
+
+    // Route cross-file go-to-definition for this project back to the app's tab
+    // opener, stashing the target position to reveal once the file is active.
+    const unregisterOpener = registerOpenFileHandler(
+      rootRef.current,
+      (rel, selection) => {
+        if (selection) pendingRevealRef.current.set(rel, selection);
+        onOpenFileRef.current?.(rel);
+      },
+    );
+
     return () => {
+      unregisterOpener();
+      lspManager.disposeClient(rootRef.current);
+      lspTimersRef.current.forEach((t) => clearTimeout(t));
+      lspTimersRef.current.clear();
+      pendingRevealRef.current.clear();
       editor.dispose();
       listenersRef.current.forEach((d) => d.dispose());
       listenersRef.current.clear();
-      modelsRef.current.forEach((m) => m.dispose());
+      modelsRef.current.forEach((m, rel) => {
+        unregisterModelFile(monaco.Uri.file(`${rootRef.current}/${rel}`).toString());
+        m.dispose();
+      });
       modelsRef.current.clear();
       viewStatesRef.current.clear();
       savedVersionRef.current.clear();
@@ -97,10 +155,21 @@ export function EditorPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Enable/disable the language server feature globally per the setting.
+  useEffect(() => {
+    lspManager.setEnabled(lspEnabled);
+  }, [lspEnabled]);
+
   // Apply the minimap setting live.
   useEffect(() => {
     editorRef.current?.updateOptions({ minimap: { enabled: showMinimap } });
   }, [showMinimap]);
+
+  // Apply the theme live. `theme` is a per-instance option here, so this won't
+  // disturb other Monaco instances (e.g. the diff viewer's own theme).
+  useEffect(() => {
+    editorRef.current?.updateOptions({ theme: editorTheme });
+  }, [editorTheme]);
 
   // Swap to the active file.
   useEffect(() => {
@@ -129,6 +198,13 @@ export function EditorPanel({
           model =
             monaco.editor.getModel(uri) ??
             monaco.editor.createModel(content, undefined, uri);
+          // Let the formatter resolve this model back to its project file.
+          registerModelFile(uri.toString(), root, rel);
+          // Open the file in the language server, if it handles this type.
+          if (lspEnabledRef.current && LSP_FILE.test(rel)) {
+            lspManager.ensureClient(root);
+            lspManager.getClient(root)?.sync(model);
+          }
           // Establish the clean baseline and watch for edits.
           savedVersionRef.current.set(rel, model.getAlternativeVersionId());
           const watched = model;
@@ -139,6 +215,18 @@ export function EditorPanel({
               saved !== undefined &&
                 watched.getAlternativeVersionId() !== saved,
             );
+            // Debounce a full-text sync so the server recomputes diagnostics.
+            if (lspEnabledRef.current && LSP_FILE.test(rel)) {
+              const prev = lspTimersRef.current.get(rel);
+              if (prev) clearTimeout(prev);
+              lspTimersRef.current.set(
+                rel,
+                setTimeout(() => {
+                  lspTimersRef.current.delete(rel);
+                  lspManager.getClient(rootRef.current)?.sync(watched);
+                }, 150),
+              );
+            }
           });
           listenersRef.current.set(rel, listener);
         } catch (err) {
@@ -154,6 +242,18 @@ export function EditorPanel({
       editor.setModel(model);
       const vs = viewStatesRef.current.get(rel);
       if (vs) editor.restoreViewState(vs);
+      // Apply a pending go-to-definition reveal for this file, if any.
+      const reveal = pendingRevealRef.current.get(rel);
+      if (reveal) {
+        pendingRevealRef.current.delete(rel);
+        if ("startLineNumber" in reveal) {
+          editor.setSelection(reveal);
+          editor.revealRangeInCenter(reveal, monaco.editor.ScrollType.Smooth);
+        } else {
+          editor.setPosition(reveal);
+          editor.revealPositionInCenter(reveal, monaco.editor.ScrollType.Smooth);
+        }
+      }
       editor.focus();
       currentRef.current = rel;
     })();
@@ -173,6 +273,15 @@ export function EditorPanel({
         viewStatesRef.current.delete(rel);
         savedVersionRef.current.delete(rel);
         lastDirtyRef.current.delete(rel);
+        const uriKey = monaco.Uri.file(`${rootRef.current}/${rel}`).toString();
+        unregisterModelFile(uriKey);
+        const timer = lspTimersRef.current.get(rel);
+        if (timer) {
+          clearTimeout(timer);
+          lspTimersRef.current.delete(rel);
+        }
+        lspManager.getClient(rootRef.current)?.didClose(uriKey);
+        pendingRevealRef.current.delete(rel);
         model.dispose();
         modelsRef.current.delete(rel);
       }

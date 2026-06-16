@@ -381,6 +381,7 @@ export function ProjectView({
                     onDirtyChange={(rel, dirty) =>
                       onFileDirtyChange(tab.id, rel, dirty)
                     }
+                    onOpenFile={(rel) => onOpenFile(tab.id, rel)}
                   />
                 </div>
               )}

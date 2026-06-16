@@ -15,6 +15,7 @@ import {
   type ShellInfo,
 } from "@/lib/tauri";
 import { persist } from "@/lib/persist";
+import { DEFAULT_EDITOR_THEME } from "@/lib/monaco";
 
 const STORAGE_KEY = "meridian.shell";
 
@@ -28,6 +29,15 @@ interface SettingsContextValue {
   /** Code editor: show the minimap. */
   showMinimap: boolean;
   setShowMinimap: (value: boolean) => void;
+  /** Code editor: run Prettier on the active file before saving. */
+  formatOnSave: boolean;
+  setFormatOnSave: (value: boolean) => void;
+  /** Code editor: active Monaco theme id (see EDITOR_THEMES). */
+  editorTheme: string;
+  setEditorTheme: (value: string) => void;
+  /** Code editor: enable the TypeScript/JavaScript language server. */
+  lspEnabled: boolean;
+  setLspEnabled: (value: boolean) => void;
   /** Run the `claude` command with --dangerously-skip-permissions. */
   dangerouslySkipPermissions: boolean;
   setDangerouslySkipPermissions: (value: boolean) => void;
@@ -62,6 +72,18 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   );
   const [showMinimap, setShowMinimapState] = useState<boolean>(
     () => persist.getItem("meridian.showMinimap") !== "0",
+  );
+  // Off by default — formatting can rewrite a file the user didn't expect to
+  // change, so it's opt-in.
+  const [formatOnSave, setFormatOnSaveState] = useState<boolean>(
+    () => persist.getItem("meridian.formatOnSave") === "1",
+  );
+  const [editorTheme, setEditorThemeState] = useState<string>(
+    () => persist.getItem("meridian.editorTheme") ?? DEFAULT_EDITOR_THEME,
+  );
+  // On by default — provides project-wide types, diagnostics, and IntelliSense.
+  const [lspEnabled, setLspEnabledState] = useState<boolean>(
+    () => persist.getItem("meridian.lspEnabled") !== "0",
   );
   // Off by default — this bypasses Claude's permission prompts.
   const [dangerouslySkipPermissions, setDangerSkipState] = useState<boolean>(
@@ -129,6 +151,21 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setShowMinimapState(value);
   };
 
+  const setFormatOnSave = (value: boolean) => {
+    persist.setItem("meridian.formatOnSave", value ? "1" : "0");
+    setFormatOnSaveState(value);
+  };
+
+  const setEditorTheme = (value: string) => {
+    persist.setItem("meridian.editorTheme", value);
+    setEditorThemeState(value);
+  };
+
+  const setLspEnabled = (value: boolean) => {
+    persist.setItem("meridian.lspEnabled", value ? "1" : "0");
+    setLspEnabledState(value);
+  };
+
   const setDangerouslySkipPermissions = (value: boolean) => {
     persist.setItem(
       "meridian.dangerouslySkipPermissions",
@@ -184,6 +221,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setShellProgram,
         showMinimap,
         setShowMinimap,
+        formatOnSave,
+        setFormatOnSave,
+        editorTheme,
+        setEditorTheme,
+        lspEnabled,
+        setLspEnabled,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
         diffStyle,

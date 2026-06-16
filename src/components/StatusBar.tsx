@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -7,16 +7,22 @@ import {
   FilePen,
   FilePlus,
   GitBranch,
+  Loader2,
+  Power,
+  RotateCw,
+  Zap,
 } from "lucide-react";
 
 import {
   claudeUsage,
   gitCurrentBranch,
   gitStatus,
+  lspStatus,
   type ClaudeUsage,
   type ClaudeUsageWindow,
   type GitFile,
 } from "@/lib/tauri";
+import { lspManager } from "@/lib/lsp/manager";
 import { ClaudeIcon } from "@/components/ClaudeIcon";
 import { BranchSwitcher } from "@/components/BranchSwitcher";
 import { GitStatusPopup } from "@/components/GitStatusPopup";
@@ -27,17 +33,19 @@ import { persist } from "@/lib/persist";
 const MODIFIED_COLOR = "#d29922";
 
 /** The toggleable status bar components, in display/menu order. */
-type StatusItem = "branch" | "changes" | "usage";
+type StatusItem = "branch" | "changes" | "lsp" | "usage";
 
 const STATUS_ITEMS: { key: StatusItem; label: string }[] = [
   { key: "branch", label: "Git Branch" },
   { key: "changes", label: "Git Changes" },
+  { key: "lsp", label: "Language Server" },
   { key: "usage", label: "Claude Usage" },
 ];
 
 const DEFAULT_VISIBLE: Record<StatusItem, boolean> = {
   branch: true,
   changes: true,
+  lsp: true,
   usage: true,
 };
 
@@ -239,6 +247,49 @@ function useClaudeUsage(enabled: boolean): ClaudeUsage | null {
   return usage;
 }
 
+/**
+ * Poll the backend for the project roots whose language-server process is
+ * actually alive. This is authoritative (the backend probes each child), not an
+ * assumption from the open file. Polls only while enabled (on a file tab).
+ */
+function useLspServers(enabled: boolean): string[] {
+  const [servers, setServers] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let active = true;
+    const refresh = () => {
+      lspStatus()
+        .then((s) => {
+          if (active) setServers(s);
+        })
+        .catch(() => {
+          /* backend unavailable; keep the last value */
+        });
+    };
+    refresh();
+    const interval = setInterval(refresh, 4000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      active = false;
+      clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [enabled]);
+
+  return servers;
+}
+
+/** Normalize a path for comparison (case-insensitive, separator-agnostic). */
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Basename of an absolute path (handles both separators). */
+function baseName(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+}
+
 /** Human-friendly "resets in 3h 20m" from an ISO instant, or null. */
 function formatReset(resetsAt: string | null): string | null {
   if (!resetsAt) return null;
@@ -415,19 +466,250 @@ function StatusBarMenu({
   );
 }
 
+/**
+ * Lightning-bolt "LSP" status item. The bolt is lit (accent) when a language
+ * server is running for the current project, muted otherwise. Click opens the
+ * running-servers popup.
+ */
+function LspStatusItem({
+  running,
+  onOpen,
+}: {
+  running: boolean;
+  onOpen: (rect: DOMRect) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="flex items-center gap-1.5 rounded px-1 -mx-1 text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+      title={
+        running
+          ? "Language server running — click for details"
+          : "No language server running for this project — click for details"
+      }
+      onClick={(e) => onOpen(e.currentTarget.getBoundingClientRect())}
+    >
+      <Zap
+        size={12}
+        strokeWidth={1.8}
+        className={`shrink-0 ${running ? "text-accent" : "text-fg-faint"}`}
+      />
+      <span>LSP</span>
+    </button>
+  );
+}
+
+interface RunningServer {
+  root: string;
+  languages: string[];
+  ready: boolean;
+}
+
+/**
+ * Popup listing the language servers that are actually running. Liveness comes
+ * from the backend (`lspStatus`, which probes each process); the per-server
+ * detail — the languages it's serving and ready state — comes from the client
+ * manager. Each server can be restarted or stopped. Hung above the LSP item.
+ */
+function LspPopup({
+  anchor,
+  currentPath,
+  onClose,
+}: {
+  anchor: DOMRect;
+  currentPath?: string;
+  onClose: () => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [servers, setServers] = useState<RunningServer[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const alive = await lspStatus();
+      const byRoot = new Map(
+        lspManager.listServers().map((d) => [normPath(d.root), d]),
+      );
+      setServers(
+        alive.map((root) => {
+          const d = byRoot.get(normPath(root));
+          return {
+            root,
+            languages: d?.languages ?? [],
+            ready: d?.ready ?? true,
+          };
+        }),
+      );
+    } catch {
+      setServers([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const tick = () => {
+      if (active) void refresh();
+    };
+    tick();
+    const interval = setInterval(tick, 2000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const restart = async (root: string) => {
+    setBusy(root);
+    try {
+      await lspManager.restartClient(root);
+    } finally {
+      setBusy(null);
+      void refresh();
+    }
+  };
+  const stop = async (root: string) => {
+    setBusy(root);
+    try {
+      await lspManager.disposeClient(root);
+    } finally {
+      setBusy(null);
+      void refresh();
+    }
+  };
+
+  const WIDTH = 320;
+  const left = Math.min(Math.max(8, anchor.left), window.innerWidth - WIDTH - 8);
+  const bottom = window.innerHeight - anchor.top + 6;
+
+  return (
+    <div
+      ref={rootRef}
+      className="fixed z-[80] flex max-h-[340px] w-[320px] flex-col overflow-hidden rounded-lg border border-border bg-bg-elevated text-[13px] shadow-2xl"
+      style={{ left, bottom }}
+    >
+      <div className="flex items-center gap-2 border-b border-border px-2.5 py-2 text-fg">
+        <Zap size={13} strokeWidth={1.8} className="shrink-0 text-accent" />
+        <span className="font-medium">Language Servers</span>
+        {servers && (
+          <span className="ml-auto text-fg-faint">{servers.length}</span>
+        )}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        {servers === null ? (
+          <div className="px-2.5 py-2 text-fg-faint">Checking…</div>
+        ) : servers.length === 0 ? (
+          <div className="px-2.5 py-2 text-fg-faint">
+            No language servers running.
+          </div>
+        ) : (
+          servers.map((s) => {
+            const isCurrent =
+              currentPath != null && normPath(s.root) === normPath(currentPath);
+            const detail = !s.ready
+              ? "starting…"
+              : s.languages.length > 0
+                ? s.languages.join(", ")
+                : "no files open";
+            return (
+              <div key={s.root} className="px-2.5 py-2" title={s.root}>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      s.ready ? "bg-emerald-500" : "bg-amber-500"
+                    }`}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-fg">
+                    {baseName(s.root)}
+                    {isCurrent && (
+                      <span className="text-fg-faint"> · current</span>
+                    )}
+                  </span>
+                  {busy === s.root ? (
+                    <Loader2
+                      size={13}
+                      strokeWidth={2}
+                      className="shrink-0 animate-spin text-fg-faint"
+                    />
+                  ) : (
+                    <div className="flex shrink-0 items-center gap-0.5">
+                      <button
+                        type="button"
+                        title="Restart server"
+                        onClick={() => void restart(s.root)}
+                        className="flex h-5 w-5 items-center justify-center rounded text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+                      >
+                        <RotateCw size={12} strokeWidth={1.8} />
+                      </button>
+                      <button
+                        type="button"
+                        title="Stop server"
+                        onClick={() => void stop(s.root)}
+                        className="flex h-5 w-5 items-center justify-center rounded text-fg-subtle transition-colors hover:bg-bg-hover hover:text-red-400"
+                      >
+                        <Power size={12} strokeWidth={1.8} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className="mt-0.5 truncate pl-4 text-[11px] text-fg-subtle">
+                  {detail}
+                </div>
+                <div className="truncate pl-4 text-[11px] text-fg-faint">
+                  typescript-language-server · {s.root}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** Full-width status bar pinned to the bottom of the window. */
-export function StatusBar({ projectPath }: { projectPath?: string }) {
+export function StatusBar({
+  projectPath,
+  onFileTab,
+}: {
+  projectPath?: string;
+  onFileTab?: boolean;
+}) {
   const { visible, toggle } = useStatusBarVisibility();
   const [reloadNonce, setReloadNonce] = useState(0);
-  const branch = useGitBranch(projectPath, visible.branch, reloadNonce);
-  const summary = useGitSummary(projectPath, visible.changes, reloadNonce);
-  const usage = useClaudeUsage(visible.usage);
-
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Viewport rect of the branch item while the switcher is open (null = closed).
   const [switcherAnchor, setSwitcherAnchor] = useState<DOMRect | null>(null);
   // Viewport rect of the changes item while the status popup is open (null = closed).
   const [statusAnchor, setStatusAnchor] = useState<DOMRect | null>(null);
+  // Viewport rect of the LSP item while its popup is open (null = closed).
+  const [lspAnchor, setLspAnchor] = useState<DOMRect | null>(null);
+
+  const branch = useGitBranch(projectPath, visible.branch, reloadNonce);
+  const summary = useGitSummary(projectPath, visible.changes, reloadNonce);
+  const usage = useClaudeUsage(visible.usage);
+  // The LSP item only shows on a file tab; poll the running servers while it
+  // does — but pause while the popup is open, since the popup polls its own
+  // (richer) copy and would otherwise duplicate the lspStatus calls.
+  const showLsp = Boolean(visible.lsp && onFileTab);
+  const lspServers = useLspServers(showLsp && lspAnchor === null);
+  const lspRunning =
+    projectPath != null &&
+    lspServers.some((r) => normPath(r) === normPath(projectPath));
 
   return (
     <footer
@@ -453,6 +735,10 @@ export function StatusBar({ projectPath }: { projectPath?: string }) {
 
       {visible.changes && summary && (
         <GitStatusItem summary={summary} onOpen={setStatusAnchor} />
+      )}
+
+      {showLsp && (
+        <LspStatusItem running={lspRunning} onOpen={setLspAnchor} />
       )}
 
       {visible.usage && usage?.available && (
@@ -489,6 +775,14 @@ export function StatusBar({ projectPath }: { projectPath?: string }) {
           anchor={statusAnchor}
           onClose={() => setStatusAnchor(null)}
           onChanged={() => setReloadNonce((n) => n + 1)}
+        />
+      )}
+
+      {lspAnchor && (
+        <LspPopup
+          anchor={lspAnchor}
+          currentPath={projectPath}
+          onClose={() => setLspAnchor(null)}
         />
       )}
     </footer>
