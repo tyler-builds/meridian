@@ -128,10 +128,10 @@ function ProjectTabItem({
       )}
       <span className="min-w-0 truncate">{tab.name}</span>
       <span className="relative -mr-1 flex h-4 w-4 shrink-0 items-center justify-center">
-        {/* Attention dot when Claude is waiting and this tab isn't being viewed;
-            it fades out on hover so the close button can take the slot. Mirrors
-            the main-tab dirty dot (MainTabBar). */}
-        {tab.attention && !active && (
+        {/* Attention dot when a Claude tab inside this (non-active) project is
+            waiting; derived from its main tabs so it clears once they're viewed.
+            Fades on hover so the close button takes the slot. */}
+        {!active && tab.mainTabs.some((m) => m.attention) && (
           <span className="pointer-events-none absolute h-[7px] w-[7px] rounded-full bg-accent transition-opacity group-hover:opacity-0" />
         )}
         <button

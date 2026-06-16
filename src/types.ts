@@ -22,6 +22,12 @@ export interface MainTab {
   relPath?: string;
   /** For file tabs: unsaved changes in the editor. */
   dirty?: boolean;
+  /**
+   * For terminal tabs: Claude (in one of this tab's panes) finished its turn or
+   * is awaiting input while this tab wasn't the one being viewed. Shown as a dot
+   * on the tab and cleared when the tab is viewed. Ephemeral — not persisted.
+   */
+  attention?: boolean;
   /** For terminal tabs: the split layout tree. */
   paneTree?: PaneNode;
   /** For terminal tabs: the focused terminal pane. */
@@ -53,10 +59,4 @@ export interface ProjectTab {
   mainTabs: MainTab[];
   /** Active main-panel tab, or null when none are open (empty state). */
   activeMainTabId: string | null;
-  /**
-   * Claude (running in one of this project's terminals) finished its turn or is
-   * awaiting input while this tab wasn't the active one. Shown as a dot on the
-   * tab and cleared when the tab is viewed. Ephemeral — not persisted.
-   */
-  attention?: boolean;
 }

@@ -108,7 +108,9 @@ function MainTabItem({
       )}
       <span className="truncate">{tab.title}</span>
       <div className="relative -mr-1 flex h-4 w-4 shrink-0 items-center justify-center">
-        {tab.dirty && (
+        {/* Accent dot: unsaved file (dirty) or Claude waiting in this tab
+            (attention). Fades on hover so the close button takes the slot. */}
+        {(tab.dirty || tab.attention) && (
           <span className="pointer-events-none absolute h-[7px] w-[7px] rounded-full bg-accent transition-opacity group-hover:opacity-0" />
         )}
         <button
@@ -119,7 +121,11 @@ function MainTabItem({
           }}
           className={cn(
             "flex h-4 w-4 items-center justify-center rounded text-fg-faint transition hover:bg-bg-active hover:text-fg group-hover:opacity-100",
-            tab.dirty ? "opacity-0" : active ? "opacity-60" : "opacity-0",
+            tab.dirty || tab.attention
+              ? "opacity-0"
+              : active
+                ? "opacity-60"
+                : "opacity-0",
           )}
           aria-label={`Close ${tab.title}`}
         >

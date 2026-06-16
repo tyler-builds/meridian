@@ -419,34 +419,62 @@ export default function App() {
     [],
   );
 
-  // Claude (in some terminal of `projectId`) started waiting on the user. Flag
-  // the project tab for attention, but only when it isn't the one being viewed —
-  // if you're already on it, there's nothing to alert. Read the active tab via a
-  // ref so the callback stays stable as you switch tabs.
+  // Claude (in main tab `mainTabId` of `projectId`) finished its turn / started
+  // waiting on the user. Flag that specific main tab so you can tell which one it
+  // was — unless it's the exact tab you're looking at (active project + active
+  // main tab), where there's nothing to alert. The project tab's dot is derived
+  // from its main tabs (see TabBar), so it lights up for free. Read the active
+  // tab via a ref so the callback stays stable as you switch tabs.
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
-  const claudeAttention = useCallback(
-    (projectId: string) => {
-      if (projectId === activeTabIdRef.current) return;
-      updateProject(projectId, (t) =>
-        t.attention ? t : { ...t, attention: true },
+  const claudeAttention = useCallback((projectId: string, mainTabId: string) => {
+    setTabs((prev) => {
+      const project = prev.find((t) => t.id === projectId);
+      if (!project) return prev;
+      const viewed =
+        projectId === activeTabIdRef.current &&
+        project.activeMainTabId === mainTabId;
+      if (viewed) return prev; // looking right at it
+      return prev.map((t) =>
+        t.id === projectId
+          ? {
+              ...t,
+              mainTabs: t.mainTabs.map((m) =>
+                m.id === mainTabId && !m.attention
+                  ? { ...m, attention: true }
+                  : m,
+              ),
+            }
+          : t,
       );
-    },
-    [updateProject],
-  );
+    });
+  }, []);
 
-  // Viewing a tab clears its attention flag (covers every path to activation:
-  // clicking the tab, opening a project, closing the neighbor that was active).
+  // Viewing a main tab clears its attention dot (and, since the project dot is
+  // derived from its main tabs, that dot too). Keyed on the active project and
+  // its viewed main tab, so it fires on every path to activation: clicking a
+  // tab, opening a project, switching main tabs, or closing the active neighbor.
+  const viewedMainTabId =
+    tabs.find((t) => t.id === activeTabId)?.activeMainTabId ?? null;
   useEffect(() => {
-    if (activeTabId == null) return;
-    setTabs((prev) =>
-      prev.some((t) => t.id === activeTabId && t.attention)
-        ? prev.map((t) =>
-            t.id === activeTabId ? { ...t, attention: false } : t,
-          )
-        : prev,
-    );
-  }, [activeTabId]);
+    if (activeTabId == null || viewedMainTabId == null) return;
+    setTabs((prev) => {
+      const t = prev.find((x) => x.id === activeTabId);
+      if (!t?.mainTabs.some((m) => m.id === viewedMainTabId && m.attention)) {
+        return prev; // nothing flagged in view — skip re-render
+      }
+      return prev.map((x) =>
+        x.id === activeTabId
+          ? {
+              ...x,
+              mainTabs: x.mainTabs.map((m) =>
+                m.id === viewedMainTabId ? { ...m, attention: false } : m,
+              ),
+            }
+          : x,
+      );
+    });
+  }, [activeTabId, viewedMainTabId]);
 
   const resizePane = useCallback(
     (
