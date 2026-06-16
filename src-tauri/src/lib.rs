@@ -1157,6 +1157,55 @@ fn pty_kill(state: State<PtyManager>, id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Save a base64-encoded pasted image to a temp file and return its absolute
+/// path. The terminal hands this path to a running program like Claude Code,
+/// which loads images by path — so an image pasted into the webview reaches
+/// Claude even on machines where its own clipboard reader (`powershell.exe
+/// Get-Clipboard`) is blocked. Old files are pruned so the directory can't grow
+/// without bound.
+#[tauri::command]
+fn save_pasted_image(data_base64: String, ext: String) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("invalid image data: {e}"))?;
+
+    // Restrict to formats Claude Code accepts; default to png (screenshots).
+    let ext = match ext.to_lowercase().as_str() {
+        "png" | "jpeg" | "jpg" | "gif" | "webp" => ext.to_lowercase(),
+        _ => "png".to_string(),
+    };
+
+    let dir = std::env::temp_dir().join("meridian-pasted-images");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    // Prune anything older than a day (pastes are ephemeral once Claude has read
+    // them; this keeps the temp dir from accumulating across sessions).
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let now = std::time::SystemTime::now();
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .map(|age| age.as_secs() > 86_400)
+                .unwrap_or(false);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!("pasted-image-{nanos}.{ext}"));
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(denormalize(&path))
+}
+
 // --- Language server (LSP) ---
 //
 // One `typescript-language-server --stdio` process per project root, run via the
@@ -2355,6 +2404,7 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            save_pasted_image,
             lsp_spawn,
             lsp_send,
             lsp_kill,

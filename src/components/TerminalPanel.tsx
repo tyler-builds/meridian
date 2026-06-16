@@ -11,6 +11,7 @@ import {
   ptyResize,
   ptySpawn,
   ptyWrite,
+  savePastedImage,
 } from "@/lib/tauri";
 
 const TERMINAL_THEME = {
@@ -101,6 +102,62 @@ export function TerminalPanel({
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
     term.open(el);
+
+    // Image paste → running program (chiefly Claude Code). The browser only
+    // hands xterm clipboard *text*, so an image-only clipboard is otherwise
+    // silently dropped. Intercept the paste in the capture phase before xterm
+    // sees it: for an image, save it to a temp file via Rust and feed the path
+    // to the PTY wrapped in bracketed-paste markers (ESC[200~ … ESC[201~) — the
+    // same way a drag-dropped/pasted path arrives — so Claude detects it and
+    // renders its own "[Image #N]" placeholder instead of the raw path. Text
+    // pastes fall through untouched to xterm's normal handling.
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      const image = items
+        ? Array.from(items).find((it) => it.type.startsWith("image/"))
+        : undefined;
+      if (!image) return; // not an image — let xterm paste text as usual
+      e.preventDefault();
+      e.stopPropagation();
+      const file = image.getAsFile();
+      if (!file) return;
+      void (async () => {
+        try {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+          });
+          const b64 = dataUrl.split(",", 2)[1] ?? "";
+          const ext = dataUrl.match(/^data:image\/(\w+)/)?.[1] ?? "png";
+          if (!b64 || disposed) return;
+          const path = await savePastedImage(b64, ext);
+          if (disposed) return;
+          // Bracketed paste: the program treats it as a pasted path, not keystrokes.
+          void ptyWrite(ptyId, `\x1b[200~${path}\x1b[201~`);
+        } catch {
+          /* clipboard read or save failed; nothing to paste */
+        }
+      })();
+    };
+    el.addEventListener("paste", handlePaste, true);
+
+    // Let Ctrl+V / Ctrl+Shift+V (and Cmd+V) fall through to the browser's native
+    // paste instead of xterm turning Ctrl+V into a 0x16 control byte. The native
+    // paste fires the `paste` handler above (images) and xterm's own text paste —
+    // the same path right-click → Paste already used, which is why that worked
+    // while the shortcuts didn't. Every other key is left to xterm.
+    term.attachCustomKeyEventHandler((e) => {
+      if (
+        e.type === "keydown" &&
+        (e.ctrlKey || e.metaKey) &&
+        (e.key === "v" || e.key === "V")
+      ) {
+        return false; // skip xterm; browser performs the paste
+      }
+      return true;
+    });
 
     // GPU renderer: draws box-drawing/block characters programmatically so
     // panel borders (e.g. Claude Code's UI) connect cleanly instead of
@@ -217,6 +274,7 @@ export function TerminalPanel({
 
     return () => {
       disposed = true;
+      el.removeEventListener("paste", handlePaste, true);
       resizeObserver.disconnect();
       unlistenOutput?.();
       unlistenExit?.();

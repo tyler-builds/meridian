@@ -386,6 +386,18 @@ export function ptyKill(id: string): Promise<void> {
   return invoke("pty_kill", { id });
 }
 
+/**
+ * Save a pasted image (base64, no `data:` prefix) to a temp file and return its
+ * absolute path. The terminal then hands the path to the running program (e.g.
+ * Claude Code) as a bracketed paste, so it loads the image by path.
+ */
+export function savePastedImage(
+  dataBase64: string,
+  ext: string,
+): Promise<string> {
+  return invoke<string>("save_pasted_image", { dataBase64, ext });
+}
+
 export function onPtyOutput(
   id: string,
   cb: (data: Uint8Array) => void,
