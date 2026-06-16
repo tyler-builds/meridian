@@ -6,17 +6,23 @@ use std::sync::Mutex;
 use std::thread;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
 };
 
 mod jira;
+#[cfg(windows)]
+mod webview_procs;
 
 /// A single running pseudo-terminal session.
 struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// The directory the shell was spawned in (the project root). Used by the
+    /// resource monitor to attribute this terminal's CPU/RAM to a project.
+    cwd: String,
 }
 
 /// Holds every live PTY keyed by a frontend-supplied id.
@@ -1081,6 +1087,7 @@ fn pty_spawn(
             master: pair.master,
             writer,
             child,
+            cwd,
         },
     );
 
@@ -1824,6 +1831,492 @@ fn install_panic_hook(log_dir: std::path::PathBuf) {
     }));
 }
 
+// --- Resource monitor ---
+//
+// Reports CPU and memory usage for the whole Meridian process tree, attributed
+// to owners the user recognizes: an "App core" bucket (the Rust host process
+// plus the WebView2 UI/GPU/renderer processes) and one bucket per open project
+// (its terminal subtrees and its language server). Embedded browser tabs fold
+// into App core today; on Windows they can later be split out per tab via the
+// WebView2 process-info API.
+//
+// CPU is normalized to the whole machine: sysinfo reports a process's CPU as a
+// percentage of ONE core (a process saturating two cores reads 200%), so the
+// summed total is divided by the logical core count. The first poll after the
+// monitor starts reads ~0% CPU (sysinfo needs two refreshes to compute a delta)
+// and self-corrects on the next tick — the frontend polls every couple seconds.
+
+/// Holds a long-lived `System` so CPU deltas are measured across polls.
+#[derive(Default)]
+struct ResourceMonitor {
+    sys: Mutex<System>,
+}
+
+/// Cached WebView2 renderer→URLs map, refreshed asynchronously on Windows (see
+/// `webview_procs`). Empty on other platforms, where browser tabs stay folded
+/// into App core.
+#[derive(Clone, Default)]
+struct WebviewProcessMap {
+    /// (renderer pid, frame source URLs).
+    renderers: std::sync::Arc<Mutex<Vec<(u32, Vec<String>)>>>,
+}
+
+/// One open browser tab and the project it belongs to (sent by the frontend so
+/// renderer source URLs can be joined back to a project by host).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserOwner {
+    url: String,
+    root: String,
+}
+
+/// Host (lowercased) of a URL, for matching renderer frame URLs to browser tabs.
+fn url_host(url: &str) -> Option<String> {
+    Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Usage {
+    /// Percent of total machine CPU capacity (0–100 across all cores).
+    cpu_pct: f32,
+    /// Percent of total system memory.
+    mem_pct: f32,
+    /// Resident set size in bytes.
+    mem_bytes: u64,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Component {
+    kind: String,
+    label: String,
+    usage: Usage,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnerUsage {
+    label: String,
+    root: Option<String>,
+    usage: Usage,
+    breakdown: Vec<Component>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceReport {
+    total: Usage,
+    app: OwnerUsage,
+    projects: Vec<OwnerUsage>,
+}
+
+/// Normalize a path for prefix comparison (case-insensitive, `/`-separated, no
+/// trailing slash) — mirrors the frontend's `normPath`.
+fn norm_path(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// True when `child` is `root` or lives beneath it.
+fn path_under(child: &str, root: &str) -> bool {
+    let c = norm_path(child);
+    let r = norm_path(root);
+    c == r || c.starts_with(&format!("{r}/"))
+}
+
+/// The most specific open root that contains `cwd` (longest match wins, so a
+/// nested project in a monorepo attributes to itself, not its parent).
+fn best_root(cwd: &str, roots: &[String]) -> Option<String> {
+    roots
+        .iter()
+        .filter(|r| path_under(cwd, r))
+        .max_by_key(|r| norm_path(r).len())
+        .cloned()
+}
+
+/// Last path segment of an absolute path (the folder name shown as a label).
+fn base_name(p: &str) -> String {
+    p.replace('\\', "/")
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(p)
+        .to_string()
+}
+
+/// Collect a process and all its descendants, skipping pids already claimed by
+/// another owner (and not descending into them, since their whole subtree was
+/// already attributed). Marks each collected pid claimed so nothing is counted
+/// twice. Project subtrees must be claimed before the App-core host walk, since
+/// terminals and language servers are descendants of the host process.
+fn collect_subtree(
+    root: u32,
+    children: &HashMap<u32, Vec<u32>>,
+    present: &HashMap<u32, (f32, u64)>,
+    claimed: &mut std::collections::HashSet<u32>,
+    out: &mut Vec<u32>,
+) {
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if claimed.contains(&pid) || !present.contains_key(&pid) {
+            continue;
+        }
+        claimed.insert(pid);
+        out.push(pid);
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+}
+
+/// Accurate per-process memory. On Windows this is the **private working set**
+/// — the resident pages unique to the process, matching Task Manager's "Memory"
+/// column — so summing it across a process tree does NOT double-count the memory
+/// Chromium shares between its browser and renderer processes (which the resident
+/// set / `sysinfo::Process::memory()` does). Falls back to `rss` if the OS query
+/// fails (access denied, process already exited).
+#[cfg(windows)]
+fn process_memory(pid: u32, rss: u64) -> u64 {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return rss;
+        };
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX2::default();
+        let cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
+        counters.cb = cb;
+        let ok = GetProcessMemoryInfo(
+            handle,
+            &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
+            cb,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if ok && counters.PrivateWorkingSetSize > 0 {
+            counters.PrivateWorkingSetSize as u64
+        } else {
+            rss
+        }
+    }
+}
+
+/// Non-Windows: resident set (no cheap private-working-set query available).
+#[cfg(not(windows))]
+fn process_memory(_pid: u32, rss: u64) -> u64 {
+    rss
+}
+
+/// True if a process looks like the `claude` CLI — checked across its name, exe
+/// path, and command line (the Node-hosted install only reveals "claude" in the
+/// cmd-line script path, while the native binary shows it in the name/exe).
+fn proc_is_claude(p: &sysinfo::Process) -> bool {
+    if p.name().to_string_lossy().to_lowercase().contains("claude") {
+        return true;
+    }
+    if let Some(exe) = p.exe() {
+        if exe.to_string_lossy().to_lowercase().contains("claude") {
+            return true;
+        }
+    }
+    p.cmd()
+        .iter()
+        .any(|a| a.to_string_lossy().to_lowercase().contains("claude"))
+}
+
+/// True if any process in a terminal's subtree is the `claude` CLI — i.e. this
+/// terminal is currently running a Claude session (reflects what's actually live,
+/// so a "Claude" tab where claude has since exited counts as a plain terminal).
+fn subtree_is_claude(pids: &[u32], sys: &System) -> bool {
+    pids.iter()
+        .any(|&pid| sys.process(Pid::from_u32(pid)).is_some_and(proc_is_claude))
+}
+
+/// Sum CPU/RAM over a set of pids, normalized to whole-machine percentages. CPU
+/// comes from `present`; memory comes from the pre-resolved accurate `mem_map`
+/// (private working set on Windows, see `process_memory`).
+fn sum_usage(
+    pids: &[u32],
+    present: &HashMap<u32, (f32, u64)>,
+    mem_map: &HashMap<u32, u64>,
+    ncpu: f32,
+    total_mem: u64,
+) -> Usage {
+    let mut cpu = 0f32;
+    let mut mem = 0u64;
+    for &p in pids {
+        if let Some(&(c, _)) = present.get(&p) {
+            cpu += c;
+        }
+        mem += mem_map.get(&p).copied().unwrap_or(0);
+    }
+    Usage {
+        cpu_pct: cpu / ncpu,
+        mem_pct: (mem as f64 / total_mem as f64 * 100.0) as f32,
+        mem_bytes: mem,
+    }
+}
+
+/// CPU + memory for the whole app, attributed to App core and each open project.
+#[tauri::command]
+fn resource_stats(
+    app: AppHandle,
+    monitor: State<ResourceMonitor>,
+    pty: State<PtyManager>,
+    lsp: State<LspManager>,
+    wv: State<WebviewProcessMap>,
+    roots: Vec<String>,
+    browsers: Vec<BrowserOwner>,
+) -> ResourceReport {
+    // Kick off an async refresh of the WebView2 renderer map (Windows only) and
+    // read the latest snapshot. The first poll sees an empty map (browsers fold
+    // into App core) and self-corrects on the next tick.
+    #[cfg(windows)]
+    webview_procs::refresh(&app, wv.renderers.clone());
+    #[cfg(not(windows))]
+    let _ = &app;
+    let renderer_map = wv.renderers.lock().unwrap().clone();
+
+    // Renderer pid -> owning project root, joined by frame-URL host. Browser
+    // tabs of a host we don't own (e.g. the main UI webview) stay unattributed
+    // and therefore land in App core.
+    let mut host_root: HashMap<String, String> = HashMap::new();
+    for b in &browsers {
+        if let Some(h) = url_host(&b.url) {
+            host_root.insert(h, b.root.clone());
+        }
+    }
+    let mut renderer_root: HashMap<u32, String> = HashMap::new();
+    for (pid, sources) in &renderer_map {
+        for s in sources {
+            if let Some(root) = url_host(s).and_then(|h| host_root.get(&h)) {
+                renderer_root.insert(*pid, root.clone());
+                break;
+            }
+        }
+    }
+
+    // Snapshot the pids we own (and their owners) without holding the sysinfo
+    // lock, then release these locks before the heavier process walk.
+    let pty_pids: Vec<(u32, String)> = {
+        let sessions = pty.sessions.lock().unwrap();
+        sessions
+            .values()
+            .filter_map(|s| s.child.process_id().map(|pid| (pid, s.cwd.clone())))
+            .collect()
+    };
+    let lsp_pids: Vec<(u32, String)> = {
+        let sessions = lsp.sessions.lock().unwrap();
+        sessions
+            .iter()
+            .map(|(root, s)| (s.child.id(), root.clone()))
+            .collect()
+    };
+    let host = std::process::id();
+
+    let mut sys = monitor.sys.lock().unwrap();
+    sys.refresh_memory();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let ncpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1) as f32;
+    let total_mem = sys.total_memory().max(1);
+
+    // Process tree: parent -> children, plus each pid's (cpu%, rss).
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut present: HashMap<u32, (f32, u64)> = HashMap::new();
+    for proc in sys.processes().values() {
+        let pid = proc.pid().as_u32();
+        present.insert(pid, (proc.cpu_usage(), proc.memory()));
+        if let Some(parent) = proc.parent() {
+            children.entry(parent.as_u32()).or_default().push(pid);
+        }
+    }
+
+    let mut claimed = std::collections::HashSet::new();
+
+    // The pids attributed to one project, collected before any summing so we can
+    // resolve accurate per-process memory for just our tree afterwards. Each PTY
+    // keeps its own subtree so it can be classified (Claude vs plain shell).
+    struct ProjectPids {
+        root: String,
+        pty_subtrees: Vec<Vec<u32>>,
+        lsp: Vec<u32>,
+        browser: Vec<u32>,
+        browser_count: usize,
+    }
+
+    // Per project: claim terminal subtrees + the language server (+ browser-tab
+    // renderers on Windows) FIRST, before the App-core host walk below.
+    let mut proj_pids: Vec<ProjectPids> = Vec::new();
+    for root in &roots {
+        let mut pty_subtrees: Vec<Vec<u32>> = Vec::new();
+        for (pid, cwd) in &pty_pids {
+            if best_root(cwd, &roots).as_deref() == Some(root.as_str()) {
+                let mut sub = Vec::new();
+                collect_subtree(*pid, &children, &present, &mut claimed, &mut sub);
+                pty_subtrees.push(sub);
+            }
+        }
+        let mut lsp_subtree = Vec::new();
+        for (pid, lroot) in &lsp_pids {
+            if norm_path(lroot) == norm_path(root) {
+                collect_subtree(*pid, &children, &present, &mut claimed, &mut lsp_subtree);
+            }
+        }
+        // Browser-tab renderers (Windows only; the map is empty elsewhere, so web
+        // content stays in App core).
+        let mut browser = Vec::new();
+        for (pid, rroot) in &renderer_root {
+            if norm_path(rroot) == norm_path(root) {
+                collect_subtree(*pid, &children, &present, &mut claimed, &mut browser);
+            }
+        }
+        let browser_count = browsers
+            .iter()
+            .filter(|b| norm_path(&b.root) == norm_path(root))
+            .count();
+        proj_pids.push(ProjectPids {
+            root: root.clone(),
+            pty_subtrees,
+            lsp: lsp_subtree,
+            browser,
+            browser_count,
+        });
+    }
+
+    // App core: the host subtree minus everything claimed above (host process,
+    // the WebView2 UI/GPU processes, and any unattributed renderers).
+    let mut app_pids = Vec::new();
+    collect_subtree(host, &children, &present, &mut claimed, &mut app_pids);
+
+    // Load command lines for just the terminal pids (the default refresh skips
+    // cmd) so we can tell a Claude session from a plain shell — a Node-hosted
+    // `claude` only shows "claude" in its cmd-line script path.
+    let term_pid_list: Vec<Pid> = proj_pids
+        .iter()
+        .flat_map(|p| p.pty_subtrees.iter().flatten().copied())
+        .map(Pid::from_u32)
+        .collect();
+    if !term_pid_list.is_empty() {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&term_pid_list),
+            false,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+    }
+
+    // Resolve accurate memory (private working set on Windows) for ONLY the
+    // processes we attribute — so the OS is queried for our ~handful of pids, not
+    // every process on the machine.
+    let mut mem_map: HashMap<u32, u64> = HashMap::with_capacity(claimed.len());
+    for &pid in &claimed {
+        let rss = present.get(&pid).map(|&(_, m)| m).unwrap_or(0);
+        mem_map.insert(pid, process_memory(pid, rss));
+    }
+
+    // Now build usages from cpu (present) + accurate memory (mem_map).
+    let projects: Vec<OwnerUsage> = proj_pids
+        .iter()
+        .map(|p| {
+            // Split this project's terminals into Claude sessions vs plain shells
+            // by what's actually running in each PTY's subtree.
+            let mut claude_pids = Vec::new();
+            let mut claude_count = 0usize;
+            let mut term_pids = Vec::new();
+            let mut term_count = 0usize;
+            for sub in &p.pty_subtrees {
+                if subtree_is_claude(sub, &sys) {
+                    claude_count += 1;
+                    claude_pids.extend(sub.iter().copied());
+                } else {
+                    term_count += 1;
+                    term_pids.extend(sub.iter().copied());
+                }
+            }
+
+            let mut breakdown = Vec::new();
+            if claude_count > 0 {
+                breakdown.push(Component {
+                    kind: "claude".into(),
+                    label: format!(
+                        "{claude_count} Claude{}",
+                        if claude_count == 1 { "" } else { "s" }
+                    ),
+                    usage: sum_usage(&claude_pids, &present, &mem_map, ncpu, total_mem),
+                });
+            }
+            if term_count > 0 {
+                breakdown.push(Component {
+                    kind: "terminal".into(),
+                    label: format!(
+                        "{term_count} terminal{}",
+                        if term_count == 1 { "" } else { "s" }
+                    ),
+                    usage: sum_usage(&term_pids, &present, &mem_map, ncpu, total_mem),
+                });
+            }
+            if !p.lsp.is_empty() {
+                breakdown.push(Component {
+                    kind: "lsp".into(),
+                    label: "Language server".into(),
+                    usage: sum_usage(&p.lsp, &present, &mem_map, ncpu, total_mem),
+                });
+            }
+            // Only surface a browser line when renderers were actually measured
+            // (so off-Windows the tabs don't appear with a misleading zero —
+            // they're counted in App core instead).
+            if !p.browser.is_empty() {
+                breakdown.push(Component {
+                    kind: "browser".into(),
+                    label: format!(
+                        "{} browser tab{}",
+                        p.browser_count,
+                        if p.browser_count == 1 { "" } else { "s" }
+                    ),
+                    usage: sum_usage(&p.browser, &present, &mem_map, ncpu, total_mem),
+                });
+            }
+            let mut all = claude_pids;
+            all.extend(term_pids);
+            all.extend(&p.lsp);
+            all.extend(&p.browser);
+            OwnerUsage {
+                label: base_name(&p.root),
+                root: Some(p.root.clone()),
+                usage: sum_usage(&all, &present, &mem_map, ncpu, total_mem),
+                breakdown,
+            }
+        })
+        .collect();
+
+    let app = OwnerUsage {
+        label: "App core".into(),
+        root: None,
+        usage: sum_usage(&app_pids, &present, &mem_map, ncpu, total_mem),
+        breakdown: Vec::new(),
+    };
+
+    // Total = app + projects (disjoint by construction, so summing is exact).
+    let total = Usage {
+        cpu_pct: app.usage.cpu_pct + projects.iter().map(|p| p.usage.cpu_pct).sum::<f32>(),
+        mem_pct: app.usage.mem_pct + projects.iter().map(|p| p.usage.mem_pct).sum::<f32>(),
+        mem_bytes: app.usage.mem_bytes + projects.iter().map(|p| p.usage.mem_bytes).sum::<u64>(),
+    };
+
+    ResourceReport {
+        total,
+        app,
+        projects,
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1833,6 +2326,8 @@ pub fn run() {
         .manage(PtyManager::default())
         .manage(LspManager::default())
         .manage(BrowserManager::default())
+        .manage(ResourceMonitor::default())
+        .manage(WebviewProcessMap::default())
         .manage(jira::JiraState::default())
         .invoke_handler(tauri::generate_handler![
             read_project_tree,
@@ -1875,6 +2370,7 @@ pub fn run() {
             browser_close,
             browser_get_url,
             claude_usage,
+            resource_stats,
             frontend_log,
             jira::jira_status,
             jira::jira_connect,

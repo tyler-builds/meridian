@@ -222,6 +222,68 @@ export function claudeUsage(): Promise<ClaudeUsage> {
   return invoke<ClaudeUsage>("claude_usage");
 }
 
+// --- Resource monitor ---
+
+/** CPU/RAM figures for one owner, normalized to the whole machine. */
+export interface Usage {
+  /** Percent of total machine CPU capacity (0–100 across all cores). */
+  cpuPct: number;
+  /** Percent of total system memory. */
+  memPct: number;
+  /** Resident set size in bytes. */
+  memBytes: number;
+}
+
+/** A category of resource use within a project (terminals, language server…). */
+export interface ResourceComponent {
+  /** Stable kind for icon selection: "terminal" | "lsp" | "browser". */
+  kind: string;
+  /** Human label, e.g. "3 terminals" or "Language server". */
+  label: string;
+  usage: Usage;
+}
+
+/** Resource use for one owner — "App core" or an open project. */
+export interface OwnerUsage {
+  /** "App core", or the project's folder name. */
+  label: string;
+  /** Absolute project root, or null for App core. */
+  root: string | null;
+  usage: Usage;
+  /** What inside this owner is consuming resources (empty for App core). */
+  breakdown: ResourceComponent[];
+}
+
+/**
+ * CPU and memory for the entire Meridian process tree, attributed to App core
+ * (host + WebView2 UI/GPU/renderers) and each open project (its terminal
+ * subtrees + language server). `total` is the exact sum of `app` + `projects`.
+ */
+export interface ResourceReport {
+  total: Usage;
+  app: OwnerUsage;
+  projects: OwnerUsage[];
+}
+
+/** One open browser tab and the project it belongs to (for renderer attribution). */
+export interface BrowserOwner {
+  url: string;
+  root: string;
+}
+
+/**
+ * Snapshot resource usage. Pass the currently-open project roots, and the open
+ * browser tabs (url + owning root) so Windows can attribute each tab's renderer
+ * to its project; elsewhere `browsers` is ignored and web content stays in App
+ * core.
+ */
+export function resourceStats(
+  roots: string[],
+  browsers: BrowserOwner[] = [],
+): Promise<ResourceReport> {
+  return invoke<ResourceReport>("resource_stats", { roots, browsers });
+}
+
 // --- Jira integration ---
 
 /** Connection state for the Jira card in Settings → Connections. */

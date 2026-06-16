@@ -723,7 +723,18 @@ export default function App() {
         const onFile =
           at?.mainTabs.find((m) => m.id === at.activeMainTabId)?.kind ===
           "file";
-        return <StatusBar projectPath={at?.path} onFileTab={onFile} />;
+        return (
+          <StatusBar
+            projectPath={at?.path}
+            onFileTab={onFile}
+            projectRoots={tabs.map((t) => t.path)}
+            browserTabs={tabs.flatMap((t) =>
+              t.mainTabs
+                .filter((m) => m.kind === "browser" && m.url)
+                .map((m) => ({ url: m.url as string, root: t.path })),
+            )}
+          />
+        );
       })()}
 
       {settingsOpen && (

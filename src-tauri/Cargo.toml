@@ -42,3 +42,20 @@ ureq = { version = "2", features = ["tls"] }
 # (Windows Credential Manager / macOS Keychain / Linux secret-service), so
 # credentials never sit in a plaintext app-data file.
 keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+# Cross-platform process enumeration (CPU% + RSS + parent links) powering the
+# Resource Manager status-bar item. We only ever walk our own process tree.
+sysinfo = "0.33"
+
+# Windows-only: read WebView2's per-renderer-process frame URLs so the Resource
+# Manager can attribute each embedded browser tab to its project. Versions match
+# the ones Tauri/wry already lock, so the `with_webview` controller type unifies.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"
+# Per-process private working set (Task Manager's "Memory" column) so summing a
+# process tree doesn't double-count pages Chromium shares between its processes.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

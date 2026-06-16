@@ -3,11 +3,14 @@ import {
   ArrowDown,
   ArrowUp,
   Check,
+  ChevronRight,
+  Cpu,
   FileMinus,
   FilePen,
   FilePlus,
   GitBranch,
   Loader2,
+  MemoryStick,
   Power,
   RotateCw,
   Zap,
@@ -18,9 +21,14 @@ import {
   gitCurrentBranch,
   gitStatus,
   lspStatus,
+  resourceStats,
+  type BrowserOwner,
   type ClaudeUsage,
   type ClaudeUsageWindow,
   type GitFile,
+  type OwnerUsage,
+  type ResourceReport,
+  type Usage,
 } from "@/lib/tauri";
 import { lspManager } from "@/lib/lsp/manager";
 import { ClaudeIcon } from "@/components/ClaudeIcon";
@@ -33,12 +41,13 @@ import { persist } from "@/lib/persist";
 const MODIFIED_COLOR = "#d29922";
 
 /** The toggleable status bar components, in display/menu order. */
-type StatusItem = "branch" | "changes" | "lsp" | "usage";
+type StatusItem = "branch" | "changes" | "lsp" | "resources" | "usage";
 
 const STATUS_ITEMS: { key: StatusItem; label: string }[] = [
   { key: "branch", label: "Git Branch" },
   { key: "changes", label: "Git Changes" },
   { key: "lsp", label: "Language Server" },
+  { key: "resources", label: "Resource Manager" },
   { key: "usage", label: "Claude Usage" },
 ];
 
@@ -46,6 +55,7 @@ const DEFAULT_VISIBLE: Record<StatusItem, boolean> = {
   branch: true,
   changes: true,
   lsp: true,
+  resources: true,
   usage: true,
 };
 
@@ -278,6 +288,66 @@ function useLspServers(enabled: boolean): string[] {
   }, [enabled]);
 
   return servers;
+}
+
+/**
+ * Poll the backend for the whole app's CPU/RAM, attributed to App core and each
+ * open project. Refreshes on a short interval while enabled and on window focus.
+ * `roots` is the list of open project roots used for attribution. A faster
+ * cadence is used while the detail popup is open for a more live feel.
+ */
+function useResourceStats(
+  enabled: boolean,
+  roots: string[],
+  browsers: BrowserOwner[],
+  fast: boolean,
+): ResourceReport | null {
+  const [report, setReport] = useState<ResourceReport | null>(null);
+  // Pass roots/browsers by value but key the effect on their identity so
+  // adding/closing a project or browser tab re-attributes immediately.
+  const rootsKey = roots.join(" ");
+  const browsersKey = browsers.map((b) => `${b.root} ${b.url}`).join(" ");
+
+  useEffect(() => {
+    // Keep the last value when toggled off (see useClaudeUsage); just pause.
+    if (!enabled) return;
+    let active = true;
+    const refresh = () => {
+      resourceStats(roots, browsers)
+        .then((r) => {
+          if (active) setReport(r);
+        })
+        .catch(() => {
+          /* transient backend error; keep the last good value */
+        });
+    };
+    refresh();
+    const interval = setInterval(refresh, fast ? 2000 : 3000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      active = false;
+      clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, fast, rootsKey, browsersKey]);
+
+  return report;
+}
+
+/** Format a byte count as a compact "512 MB" / "1.3 GB" string. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+
+/** Tailwind text color for a percentage: subtle until it climbs, then warns. */
+function pctColor(pct: number): string {
+  if (pct >= 80) return "text-red-400";
+  if (pct >= 50) return "text-amber-400";
+  return "text-fg-subtle";
 }
 
 /** Normalize a path for comparison (case-insensitive, separator-agnostic). */
@@ -681,13 +751,186 @@ function LspPopup({
   );
 }
 
+/**
+ * Compact CPU% + RAM% for the whole app, shown on the right of the bar. Click
+ * opens the detailed per-project popup.
+ */
+function ResourceItem({
+  total,
+  onOpen,
+}: {
+  total: Usage;
+  onOpen: (rect: DOMRect) => void;
+}) {
+  const cpu = Math.round(total.cpuPct);
+  const mem = Math.round(total.memPct);
+  return (
+    <button
+      type="button"
+      className="flex items-center gap-2 rounded px-1 -mx-1 text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+      title={`Meridian is using ${cpu}% CPU and ${mem}% RAM (${formatBytes(
+        total.memBytes,
+      )}) — click for a per-project breakdown`}
+      onClick={(e) => onOpen(e.currentTarget.getBoundingClientRect())}
+    >
+      <span className={`flex items-center gap-1 ${pctColor(total.cpuPct)}`}>
+        <Cpu size={12} strokeWidth={1.8} className="shrink-0" />
+        {cpu}%
+      </span>
+      <span className={`flex items-center gap-1 ${pctColor(total.memPct)}`}>
+        <MemoryStick size={12} strokeWidth={1.8} className="shrink-0" />
+        {mem}%
+      </span>
+    </button>
+  );
+}
+
+/** The CPU% / RAM% pair shown on the right of every popup row. */
+function UsageFigures({ usage, dim }: { usage: Usage; dim?: boolean }) {
+  const base = dim ? "text-fg-faint" : "text-fg-subtle";
+  return (
+    <span className="flex shrink-0 items-center gap-2 tabular-nums">
+      <span className="flex w-12 items-center justify-end gap-1">
+        <Cpu size={11} strokeWidth={1.8} className={`shrink-0 ${base}`} />
+        <span className={dim ? "text-fg-faint" : pctColor(usage.cpuPct)}>
+          {usage.cpuPct.toFixed(usage.cpuPct < 10 ? 1 : 0)}%
+        </span>
+      </span>
+      <span className="flex w-[4.5rem] items-center justify-end gap-1">
+        <MemoryStick size={11} strokeWidth={1.8} className={`shrink-0 ${base}`} />
+        <span
+          className={`whitespace-nowrap ${
+            dim ? "text-fg-faint" : pctColor(usage.memPct)
+          }`}
+        >
+          {formatBytes(usage.memBytes)}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/** One owner row (App core or a project) with an optional expandable breakdown. */
+function OwnerRow({ owner }: { owner: OwnerUsage }) {
+  const [open, setOpen] = useState(false);
+  const expandable = owner.breakdown.length > 0;
+
+  return (
+    <div>
+      <button
+        type="button"
+        disabled={!expandable}
+        onClick={() => expandable && setOpen((o) => !o)}
+        className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors ${
+          expandable ? "hover:bg-bg-hover" : "cursor-default"
+        }`}
+        title={owner.root ?? "The app host process plus the UI, GPU and web content"}
+      >
+        <ChevronRight
+          size={12}
+          strokeWidth={2}
+          className={`shrink-0 text-fg-faint transition-transform ${
+            expandable ? "" : "opacity-0"
+          } ${open ? "rotate-90" : ""}`}
+        />
+        <span className="min-w-0 flex-1 truncate text-fg">{owner.label}</span>
+        <UsageFigures usage={owner.usage} />
+      </button>
+      {open &&
+        owner.breakdown.map((c) => (
+          <div
+            key={c.kind}
+            className="flex items-center gap-1.5 py-1 pl-7 pr-2.5 text-[12px]"
+          >
+            <span className="min-w-0 flex-1 truncate text-fg-subtle">
+              {c.label}
+            </span>
+            <UsageFigures usage={c.usage} dim />
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/**
+ * Detail popup for the Resource Manager: the app-wide total at the top, then a
+ * row per owner (App core + each open project), each expandable to show what
+ * inside it is consuming resources. Hung above the resource item; polls its own
+ * faster copy while open. Closes on outside click or Escape.
+ */
+function ResourcePopup({
+  anchor,
+  report,
+  onClose,
+}: {
+  anchor: DOMRect;
+  report: ResourceReport | null;
+  onClose: () => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node))
+        onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const WIDTH = 340;
+  const left = Math.min(Math.max(8, anchor.left), window.innerWidth - WIDTH - 8);
+  const bottom = window.innerHeight - anchor.top + 6;
+
+  return (
+    <div
+      ref={rootRef}
+      className="fixed z-[80] flex max-h-[380px] w-[340px] flex-col overflow-hidden rounded-lg border border-border bg-bg-elevated text-[13px] shadow-2xl"
+      style={{ left, bottom }}
+    >
+      <div className="flex items-center gap-2 border-b border-border px-2.5 py-2 text-fg">
+        <Cpu size={13} strokeWidth={1.8} className="shrink-0 text-accent" />
+        <span className="font-medium">Resource Manager</span>
+        {report && <UsageFigures usage={report.total} />}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        {report === null ? (
+          <div className="px-2.5 py-2 text-fg-faint">Measuring…</div>
+        ) : (
+          <>
+            <OwnerRow owner={report.app} />
+            {report.projects.length > 0 && (
+              <div className="mt-1 border-t border-border/60 pt-1">
+                {report.projects.map((p) => (
+                  <OwnerRow key={p.root ?? p.label} owner={p} />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** Full-width status bar pinned to the bottom of the window. */
 export function StatusBar({
   projectPath,
   onFileTab,
+  projectRoots = [],
+  browserTabs = [],
 }: {
   projectPath?: string;
   onFileTab?: boolean;
+  projectRoots?: string[];
+  browserTabs?: BrowserOwner[];
 }) {
   const { visible, toggle } = useStatusBarVisibility();
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -698,6 +941,8 @@ export function StatusBar({
   const [statusAnchor, setStatusAnchor] = useState<DOMRect | null>(null);
   // Viewport rect of the LSP item while its popup is open (null = closed).
   const [lspAnchor, setLspAnchor] = useState<DOMRect | null>(null);
+  // Viewport rect of the resource item while its popup is open (null = closed).
+  const [resAnchor, setResAnchor] = useState<DOMRect | null>(null);
 
   const branch = useGitBranch(projectPath, visible.branch, reloadNonce);
   const summary = useGitSummary(projectPath, visible.changes, reloadNonce);
@@ -710,6 +955,13 @@ export function StatusBar({
   const lspRunning =
     projectPath != null &&
     lspServers.some((r) => normPath(r) === normPath(projectPath));
+  // Resource stats poll faster while the popup is open for a live feel.
+  const resources = useResourceStats(
+    visible.resources,
+    projectRoots,
+    browserTabs,
+    resAnchor !== null,
+  );
 
   return (
     <footer
@@ -741,11 +993,18 @@ export function StatusBar({
         <LspStatusItem running={lspRunning} onOpen={setLspAnchor} />
       )}
 
-      {visible.usage && usage?.available && (
+      {(visible.resources || (visible.usage && usage?.available)) && (
         <div className="ml-auto flex items-center gap-3">
-          <ClaudeIcon size={12} className="shrink-0" />
-          <UsageBar label="5hr" window={usage.fiveHour} />
-          <UsageBar label="wk" window={usage.sevenDay} />
+          {visible.resources && resources && (
+            <ResourceItem total={resources.total} onOpen={setResAnchor} />
+          )}
+          {visible.usage && usage?.available && (
+            <div className="flex items-center gap-3">
+              <ClaudeIcon size={12} className="shrink-0" />
+              <UsageBar label="5hr" window={usage.fiveHour} />
+              <UsageBar label="wk" window={usage.sevenDay} />
+            </div>
+          )}
         </div>
       )}
 
@@ -783,6 +1042,14 @@ export function StatusBar({
           anchor={lspAnchor}
           currentPath={projectPath}
           onClose={() => setLspAnchor(null)}
+        />
+      )}
+
+      {resAnchor && (
+        <ResourcePopup
+          anchor={resAnchor}
+          report={resources}
+          onClose={() => setResAnchor(null)}
         />
       )}
     </footer>
