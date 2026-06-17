@@ -12,6 +12,7 @@ import App from "./App";
 import { SettingsProvider } from "./lib/settings";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { initPersistence } from "./lib/persist";
+import { initFreezeWatchdog } from "./lib/watchdog";
 
 // Forward uncaught JS errors and unhandled promise rejections to the Rust log
 // file, so frontend failures survive the webview (the devtools console is gone
@@ -34,6 +35,10 @@ window.addEventListener("unhandledrejection", (e) => {
     `unhandledrejection: ${r instanceof Error ? `${r.message}\n${r.stack ?? ""}` : String(r)}`,
   );
 });
+
+// Detect UI-thread freezes from inside the webview and log them (with their
+// likely cause) to the durable log file for post-freeze review.
+initFreezeWatchdog();
 
 // Note: StrictMode is intentionally omitted. Its double-mount in development
 // would spawn (and orphan) duplicate PTY processes per terminal.

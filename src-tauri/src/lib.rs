@@ -1101,26 +1101,83 @@ fn pty_spawn(
         },
     );
 
-    // Pump PTY output to the frontend on a dedicated thread. Target the main
-    // webview only — a bare `emit` broadcasts every chunk to ALL webviews,
-    // including the embedded browser tabs' external pages, which can't use the
-    // events and just burn renderer CPU evaluating them.
+    // Pump PTY output to the frontend. Target the main webview only — a bare
+    // `emit` broadcasts every chunk to ALL webviews, including the embedded
+    // browser tabs' external pages, which can't use the events and just burn
+    // renderer CPU evaluating them.
+    //
+    // Two threads with a channel between them, so output is COALESCED before it
+    // crosses IPC: a chatty program (build, `npm install`, `cat` of a large
+    // file, Claude streaming) produces back-to-back 8 KB reads, and emitting one
+    // event per read floods the webview's single JS thread — the cause of
+    // output-driven UI freezes. The reader pulls bytes as fast as the PTY
+    // yields; the emitter batches them into at most one event per ~frame (16 ms)
+    // or 64 KB, and base64-encodes the payload. (Bytes sent as a `Vec<u8>` cross
+    // Tauri IPC as a JSON number-array — `[27,91,...]` — inflating each chunk
+    // ~6-10x and forcing a per-element parse on the frontend; a base64 string is
+    // compact and decodes in one pass.)
     let app_handle = app.clone();
     let mut reader = reader;
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if app_handle
-                        .emit_to("main", &output_event, buf[..n].to_vec())
-                        .is_err()
-                    {
+                    // Channel closed means the emitter stopped (webview gone).
+                    if tx.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
                 }
                 Err(_) => break,
+            }
+        }
+        // Dropping `tx` here signals the emitter to flush and emit the exit event.
+    });
+
+    thread::spawn(move || {
+        use base64::Engine;
+        use std::sync::mpsc::RecvTimeoutError;
+        const FLUSH_BYTES: usize = 64 * 1024;
+        const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+        let mut acc: Vec<u8> = Vec::with_capacity(FLUSH_BYTES);
+        let flush = |acc: &mut Vec<u8>| -> bool {
+            if acc.is_empty() {
+                return true;
+            }
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&acc);
+            acc.clear();
+            app_handle.emit_to("main", &output_event, encoded).is_ok()
+        };
+
+        loop {
+            // Block with no timeout while idle (zero CPU); once bytes are
+            // buffered, race the flush timer so a burst is delivered within one
+            // frame instead of being held until the next read.
+            let recv = if acc.is_empty() {
+                rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
+            } else {
+                rx.recv_timeout(FLUSH_INTERVAL)
+            };
+            match recv {
+                Ok(chunk) => {
+                    acc.extend_from_slice(&chunk);
+                    if acc.len() >= FLUSH_BYTES && !flush(&mut acc) {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if !flush(&mut acc) {
+                        return;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    let _ = flush(&mut acc);
+                    break;
+                }
             }
         }
         let _ = app_handle.emit_to("main", &exit_event, ());
@@ -2136,8 +2193,17 @@ fn resource_stats(
     // Kick off an async refresh of the WebView2 renderer map (Windows only) and
     // read the latest snapshot. The first poll sees an empty map (browsers fold
     // into App core) and self-corrects on the next tick.
+    //
+    // Only enumerate when browser tabs actually exist: `webview_procs::refresh`
+    // marshals a `GetProcessExtendedInfos` COM walk (over every renderer and its
+    // frame URLs) onto the GUI thread, so running it every poll tick when there
+    // are no browser tabs spends UI-thread time on work whose result is unused
+    // (with no browsers, `host_root` is empty and nothing gets attributed). This
+    // keeps the status-bar poll off the paint/input path in the common case.
     #[cfg(windows)]
-    webview_procs::refresh(&app, wv.renderers.clone());
+    if !browsers.is_empty() {
+        webview_procs::refresh(&app, wv.renderers.clone());
+    }
     #[cfg(not(windows))]
     let _ = &app;
     let renderer_map = wv.renderers.lock().unwrap().clone();

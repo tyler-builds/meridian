@@ -398,13 +398,34 @@ export function savePastedImage(
   return invoke<string>("save_pasted_image", { dataBase64, ext });
 }
 
+// Rolling terminal-output counters the freeze watchdog samples to attribute a
+// main-thread stall to its likely cause — PTY output flooding the JS event loop
+// is the dominant one. The watchdog resets these each tick (see watchdog.ts).
+let ptyWindowBytes = 0;
+let ptyWindowEvents = 0;
+export function ptyOutputWindow(): { bytes: number; events: number } {
+  return { bytes: ptyWindowBytes, events: ptyWindowEvents };
+}
+export function resetPtyOutputWindow(): void {
+  ptyWindowBytes = 0;
+  ptyWindowEvents = 0;
+}
+
 export function onPtyOutput(
   id: string,
   cb: (data: Uint8Array) => void,
 ): Promise<UnlistenFn> {
-  return listen<number[]>(`pty://output/${id}`, (e) =>
-    cb(new Uint8Array(e.payload)),
-  );
+  // Backend sends coalesced, base64-encoded chunks (see the PTY emitter in
+  // lib.rs). Decode in one pass — far cheaper than rebuilding a Uint8Array from
+  // a JSON number-array element by element.
+  return listen<string>(`pty://output/${id}`, (e) => {
+    const bin = atob(e.payload);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    ptyWindowBytes += bytes.length;
+    ptyWindowEvents += 1;
+    cb(bytes);
+  });
 }
 
 export function onPtyExit(id: string, cb: () => void): Promise<UnlistenFn> {
