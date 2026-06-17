@@ -188,15 +188,16 @@ async fn prettier_format(path: String, content: String) -> Result<PrettierResult
             });
         };
 
-        let spawned = Command::new("node")
-            .arg(&entry)
+        let mut cmd = Command::new("node");
+        cmd.arg(&entry)
             .arg("--stdin-filepath")
             .arg(&file_path)
             .current_dir(&file_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
+            .stderr(Stdio::piped());
+        hide_console(&mut cmd);
+        let spawned = cmd.spawn();
 
         // Node missing from PATH (or unlaunchable) is not fatal — fall back to
         // the bundled formatter rather than surfacing an error.
@@ -505,6 +506,20 @@ fn git_current_branch(path: String) -> Option<String> {
     }
 }
 
+/// Apply the Windows CREATE_NO_WINDOW flag so spawning a child process doesn't
+/// flash (or leave open) a console window. No-op on other platforms. Use this
+/// for every child process we launch — `git`, `node`, the language server — so
+/// none of them surface a stray terminal in the packaged app.
+fn hide_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Run `git` inside `root` and capture its output. On Windows the
 /// CREATE_NO_WINDOW flag keeps a console from flashing on each invocation.
 fn run_git(root: &str, args: &[&str]) -> Result<std::process::Output, String> {
@@ -514,12 +529,7 @@ fn run_git(root: &str, args: &[&str]) -> Result<std::process::Output, String> {
     // (and CREATE_NO_WINDOW on Windows) such a prompt can't be answered and
     // would hang. Force git to fail fast instead so the error surfaces in the UI.
     cmd.env("GIT_TERMINAL_PROMPT", "0");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    hide_console(&mut cmd);
     cmd.output().map_err(|e| e.to_string())
 }
 
@@ -1305,18 +1315,18 @@ fn lsp_spawn(
     let server = find_language_server(Path::new(&root), &app)
         .ok_or_else(|| "No TypeScript language server found".to_string())?;
 
-    let mut child = Command::new("node")
-        .arg(denormalize(&server))
+    let mut cmd = Command::new("node");
+    cmd.arg(denormalize(&server))
         .arg("--stdio")
         .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            log::warn!("LSP: failed to launch node for {root}: {e}");
-            format!("Could not launch the language server via Node: {e}")
-        })?;
+        .stderr(Stdio::piped());
+    hide_console(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| {
+        log::warn!("LSP: failed to launch node for {root}: {e}");
+        format!("Could not launch the language server via Node: {e}")
+    })?;
     log::info!("LSP: spawned server for {root}");
 
     let stdout = child.stdout.take().ok_or("language server has no stdout")?;
