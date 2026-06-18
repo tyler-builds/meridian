@@ -73,17 +73,25 @@ jobs:
             rust-target: x86_64-unknown-linux-gnu
             args: ""
     runs-on: ${{ matrix.platform }}
+    # A stuck step (e.g. apt waiting on a prompt) would otherwise run for the
+    # default 6 hours. Cap it; a real cold build of any leg finishes well under.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
       # Tauri's Linux build needs the WebKitGTK / GTK / AppIndicator dev
       # headers and patchelf (for the AppImage). 22.04 ships webkit2gtk-4.1 and
       # links an older glibc, so the AppImage runs on a wider range of distros.
+      # DEBIAN_FRONTEND=noninteractive + NEEDRESTART_MODE=a stop apt from
+      # blocking on a debconf/needrestart prompt (the usual cause of a hang).
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          NEEDRESTART_MODE: a
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
