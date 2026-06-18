@@ -22,7 +22,7 @@ jobs:
   create-release:
     permissions:
       contents: write
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.create-release.outputs.result }}
     steps:
@@ -59,20 +59,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Smallest Blacksmith size per OS: Linux/Windows floor at 2 vCPU, macOS
-        # at 6 vCPU (no smaller macOS runner exists). macOS runners are Apple
-        # Silicon, so x86_64 is still a cross-compile — same as before.
+        # macos-latest is Apple Silicon, so the x86_64 leg is a cross-compile.
         include:
-          - platform: blacksmith-2vcpu-windows-2025
+          - platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
             args: ""
-          - platform: blacksmith-6vcpu-macos-latest
+          - platform: macos-latest
             rust-target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
-          - platform: blacksmith-6vcpu-macos-latest
+          - platform: macos-latest
             rust-target: x86_64-apple-darwin
             args: "--target x86_64-apple-darwin"
-          - platform: blacksmith-2vcpu-ubuntu-2204
+          - platform: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
             args: ""
     runs-on: ${{ matrix.platform }}
@@ -149,7 +147,7 @@ jobs:
   publish-release:
     permissions:
       contents: write
-    runs-on: blacksmith-2vcpu-ubuntu-2204
+    runs-on: ubuntu-latest
     needs: [create-release, build-tauri]
     steps:
       - name: Publish release
