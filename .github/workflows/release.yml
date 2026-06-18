@@ -1,7 +1,7 @@
 name: Release build
 
-# Build unsigned Windows + macOS installers whenever a vX.Y.Z tag is pushed,
-# and attach them to a published GitHub Release named for the tag.
+# Build unsigned Windows, macOS, and Linux installers whenever a vX.Y.Z tag is
+# pushed, and attach them to a published GitHub Release named for the tag.
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
@@ -63,7 +63,7 @@ jobs:
         include:
           - platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
-            args: ""
+            args: "--bundles nsis"
           - platform: macos-latest
             rust-target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
@@ -72,7 +72,7 @@ jobs:
             args: "--target x86_64-apple-darwin"
           - platform: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
-            args: ""
+            args: "--bundles appimage"
     runs-on: ${{ matrix.platform }}
     # A stuck step (e.g. apt waiting on a prompt) would otherwise run for the
     # default 6 hours. Cap it; a real cold build of any leg finishes well under.
