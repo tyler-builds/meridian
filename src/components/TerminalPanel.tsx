@@ -270,8 +270,14 @@ export function TerminalPanel({
       // not-yet-spawned id are a no-op in the backend, so attaching early is
       // safe.
       term.onData((data) => void ptyWrite(ptyId, data));
+      // A Claude tab launches `claude` as its initial command; start it in
+      // fullscreen (alternate-screen) rendering by default. Scoped to this
+      // pane's shell, so plain terminal tabs are unaffected.
+      const isClaude =
+        initialCommand === "claude" || initialCommand?.startsWith("claude ");
+      const env = isClaude ? { CLAUDE_CODE_NO_FLICKER: "1" } : undefined;
       try {
-        await ptySpawn(ptyId, cwd, term.cols, term.rows, shell);
+        await ptySpawn(ptyId, cwd, term.cols, term.rows, shell, env);
         spawned = true;
         lastCols = term.cols;
         lastRows = term.rows;

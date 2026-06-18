@@ -370,8 +370,9 @@ export function ptySpawn(
   cols: number,
   rows: number,
   shell?: string,
+  env?: Record<string, string>,
 ): Promise<void> {
-  return invoke("pty_spawn", { id, cwd, cols, rows, shell });
+  return invoke("pty_spawn", { id, cwd, cols, rows, shell, env });
 }
 
 export function ptyWrite(id: string, data: string): Promise<void> {

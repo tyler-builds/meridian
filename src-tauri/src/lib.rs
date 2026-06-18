@@ -1062,6 +1062,7 @@ fn pty_spawn(
     cols: u16,
     rows: u16,
     shell: Option<String>,
+    env: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -1076,6 +1077,13 @@ fn pty_spawn(
     let mut cmd = CommandBuilder::new(resolve_shell(shell));
     if Path::new(&cwd).is_dir() {
         cmd.cwd(&cwd);
+    }
+    // Extra environment for the shell (and anything it launches, e.g. a Claude
+    // tab sets CLAUDE_CODE_NO_FLICKER so `claude` starts in fullscreen).
+    if let Some(env) = env {
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
     }
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
