@@ -2,6 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
+// --- App metadata ---
+//
+// `appVersion()` is the version from tauri.conf.json, which CI stamps from the
+// release tag (see scripts/ci-set-version.mjs). In dev it's the committed
+// placeholder. Both are covered by `core:default`, so no extra capability.
+export {
+  getVersion as appVersion,
+  getTauriVersion,
+} from "@tauri-apps/api/app";
+
 /** Open the native folder picker. Returns the chosen absolute path, or null if cancelled. */
 export async function pickProjectFolder(): Promise<string | null> {
   const selected = await open({

@@ -5,6 +5,7 @@ import {
   Check,
   ChevronRight,
   Cpu,
+  Download,
   FileMinus,
   FilePen,
   FilePlus,
@@ -31,6 +32,7 @@ import {
   type Usage,
 } from "@/lib/tauri";
 import { lspManager } from "@/lib/lsp/manager";
+import { useUpdater, type UpdaterStatus } from "@/lib/updater";
 import { ClaudeIcon } from "@/components/ClaudeIcon";
 import { BranchSwitcher } from "@/components/BranchSwitcher";
 import { GitStatusPopup } from "@/components/GitStatusPopup";
@@ -920,6 +922,45 @@ function ResourcePopup({
   );
 }
 
+/**
+ * Self-update call-to-action. Hidden unless an update is available or actively
+ * downloading; clicking it downloads, installs, and relaunches. `ml-auto` pins
+ * it (and the resource/usage cluster after it) to the right of the bar.
+ */
+function UpdateStatusItem({
+  status,
+  onInstall,
+}: {
+  status: UpdaterStatus;
+  onInstall: () => void;
+}) {
+  if (status.kind === "downloading") {
+    return (
+      <span
+        className="ml-auto flex items-center gap-1.5 text-accent"
+        title={`Downloading Meridian ${status.version}…`}
+      >
+        <Loader2 size={12} strokeWidth={2} className="shrink-0 animate-spin" />
+        {status.pct != null ? `Updating… ${status.pct}%` : "Updating…"}
+      </span>
+    );
+  }
+  if (status.kind === "available") {
+    return (
+      <button
+        type="button"
+        className="ml-auto flex items-center gap-1.5 rounded px-1 -mx-1 text-accent transition-colors hover:bg-bg-hover"
+        title={`Meridian ${status.version} is available — click to install and restart`}
+        onClick={onInstall}
+      >
+        <Download size={12} strokeWidth={1.8} className="shrink-0" />
+        Update to {status.version}
+      </button>
+    );
+  }
+  return null;
+}
+
 /** Full-width status bar pinned to the bottom of the window. */
 export function StatusBar({
   projectPath,
@@ -933,6 +974,7 @@ export function StatusBar({
   browserTabs?: BrowserOwner[];
 }) {
   const { visible, toggle } = useStatusBarVisibility();
+  const updater = useUpdater();
   const [reloadNonce, setReloadNonce] = useState(0);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // Viewport rect of the branch item while the switcher is open (null = closed).
@@ -992,6 +1034,11 @@ export function StatusBar({
       {showLsp && (
         <LspStatusItem running={lspRunning} onOpen={setLspAnchor} />
       )}
+
+      <UpdateStatusItem
+        status={updater.status}
+        onInstall={() => void updater.installAndRestart()}
+      />
 
       {(visible.resources || (visible.usage && usage?.available)) && (
         <div className="ml-auto flex items-center gap-3">

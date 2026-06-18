@@ -4,6 +4,7 @@ import {
   Check,
   Code2,
   GitCompare,
+  Info,
   Loader2,
   Terminal,
   TriangleAlert,
@@ -12,8 +13,9 @@ import {
 } from "lucide-react";
 
 import { useSettings } from "@/lib/settings";
+import { useUpdater } from "@/lib/updater";
 import { EDITOR_THEMES } from "@/lib/monaco";
-import { openExternal } from "@/lib/tauri";
+import { appVersion, getTauriVersion, openExternal } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -24,7 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-type SectionId = "terminal" | "editor" | "diff" | "connections";
+type SectionId = "terminal" | "editor" | "diff" | "connections" | "about";
 
 const SECTIONS: {
   id: SectionId;
@@ -35,6 +37,7 @@ const SECTIONS: {
   { id: "editor", label: "Code Editor", icon: Code2 },
   { id: "diff", label: "Diff Viewer", icon: GitCompare },
   { id: "connections", label: "Connections", icon: Cable },
+  { id: "about", label: "About", icon: Info },
 ];
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -100,8 +103,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <EditorSection />
             ) : section === "diff" ? (
               <DiffSection />
-            ) : (
+            ) : section === "connections" ? (
               <ConnectionsSection />
+            ) : (
+              <AboutSection />
             )}
           </div>
         </div>
@@ -403,5 +408,137 @@ function StatusPill({
     <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-bg-hover px-2.5 py-1 text-[11px] font-medium text-fg-subtle">
       Not connected
     </span>
+  );
+}
+
+/**
+ * About section — app identity and build versions. The version comes from
+ * tauri.conf.json, which CI stamps from the release tag (see
+ * scripts/ci-set-version.mjs); locally it's the committed placeholder.
+ */
+function AboutSection() {
+  const [version, setVersion] = useState<string | null>(null);
+  const [runtime, setRuntime] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void appVersion()
+      .then((v) => !cancelled && setVersion(v))
+      .catch(() => {});
+    void getTauriVersion()
+      .then((v) => !cancelled && setRuntime(v))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-bg-active text-fg">
+          <span className="text-lg font-semibold">M</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[15px] font-medium text-fg">Meridian</span>
+          <span className="text-xs text-fg-subtle">
+            Agentic development environment
+          </span>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-border bg-bg">
+        <InfoRow label="Version" value={version ?? "—"} />
+        <div className="border-t border-border" />
+        <InfoRow label="Tauri runtime" value={runtime ?? "—"} />
+      </div>
+
+      <UpdateControl />
+
+      <button
+        type="button"
+        onClick={() =>
+          void openExternal("https://github.com/tyler-builds/meridian")
+        }
+        className="text-[13px] text-accent hover:underline"
+      >
+        View on GitHub
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Manual update control for the About tab. Mirrors the silent launch check and
+ * the status-bar CTA, but lets the user check on demand and shows the outcome
+ * (up to date / available / error) inline.
+ */
+function UpdateControl() {
+  const { status, check, installAndRestart } = useUpdater();
+  const busy = status.kind === "checking" || status.kind === "downloading";
+
+  const label =
+    status.kind === "checking"
+      ? "Checking…"
+      : status.kind === "downloading"
+        ? status.pct != null
+          ? `Updating… ${status.pct}%`
+          : "Updating…"
+        : status.kind === "available"
+          ? `Install ${status.version} & restart`
+          : "Check for updates";
+
+  const onClick = () => {
+    if (status.kind === "available") void installAndRestart();
+    else void check(true);
+  };
+
+  const message =
+    status.kind === "uptodate"
+      ? "You're on the latest version."
+      : status.kind === "unsupported"
+        ? "Updates are only available in installed (release) builds."
+        : status.kind === "error"
+          ? `Update failed: ${status.message}`
+          : null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={busy}
+        className={cn(
+          "flex h-8 items-center gap-2 self-start rounded-md px-3 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+          status.kind === "available"
+            ? "bg-accent text-bg hover:bg-accent/90"
+            : "border border-border text-fg-subtle hover:bg-bg-hover hover:text-fg",
+        )}
+      >
+        {busy && (
+          <Loader2 size={13} strokeWidth={2} className="animate-spin" />
+        )}
+        {label}
+      </button>
+      {message && (
+        <p
+          className={cn(
+            "text-[12px] leading-relaxed",
+            status.kind === "error" ? "text-red-400" : "text-fg-subtle",
+          )}
+        >
+          {message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between px-4 py-2.5">
+      <span className="text-[13px] text-fg-subtle">{label}</span>
+      <span className="font-mono text-[13px] text-fg">{value}</span>
+    </div>
   );
 }

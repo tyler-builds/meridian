@@ -26,6 +26,11 @@ log = "0.4"
 tauri = { version = "2.7.0", features = ["unstable"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2.7.1"
+# Self-update: checks the GitHub release feed (latest.json), verifies the
+# minisign signature against the baked-in pubkey, and swaps the installed app.
+# `process` provides the relaunch after a desktop update is applied.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 # Opens URLs/paths with the OS default handler (ShellExecute on Windows). Used
 # to launch the system browser for the Jira OAuth consent flow and external
 # links — correctly resolves the default browser and preserves query strings.

@@ -10,6 +10,7 @@ import "./styles/globals.css";
 
 import App from "./App";
 import { SettingsProvider } from "./lib/settings";
+import { UpdaterProvider } from "./lib/updater";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { initPersistence } from "./lib/persist";
 import { initFreezeWatchdog } from "./lib/watchdog";
@@ -50,7 +51,9 @@ void initPersistence().finally(() => {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <ErrorBoundary label="app">
       <SettingsProvider>
-        <App />
+        <UpdaterProvider>
+          <App />
+        </UpdaterProvider>
       </SettingsProvider>
     </ErrorBoundary>,
   );
