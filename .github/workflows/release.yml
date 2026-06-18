@@ -22,7 +22,7 @@ jobs:
   create-release:
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     outputs:
       release_id: ${{ steps.create-release.outputs.result }}
     steps:
@@ -59,17 +59,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Smallest Blacksmith size per OS: Linux/Windows floor at 2 vCPU, macOS
+        # at 6 vCPU (no smaller macOS runner exists). macOS runners are Apple
+        # Silicon, so x86_64 is still a cross-compile — same as before.
         include:
-          - platform: windows-latest
+          - platform: blacksmith-2vcpu-windows-2025
             rust-target: x86_64-pc-windows-msvc
             args: ""
-          - platform: macos-latest
+          - platform: blacksmith-6vcpu-macos-latest
             rust-target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
+          - platform: blacksmith-6vcpu-macos-latest
             rust-target: x86_64-apple-darwin
             args: "--target x86_64-apple-darwin"
-          - platform: ubuntu-22.04
+          - platform: blacksmith-2vcpu-ubuntu-2204
             rust-target: x86_64-unknown-linux-gnu
             args: ""
     runs-on: ${{ matrix.platform }}
@@ -88,7 +91,7 @@ jobs:
       #     instead of stalling on a dropped fetch.
       #   DEBIAN_FRONTEND/NEEDRESTART_MODE: never block on a config prompt.
       - name: Install Linux build dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         env:
           DEBIAN_FRONTEND: noninteractive
           NEEDRESTART_MODE: a
@@ -146,7 +149,7 @@ jobs:
   publish-release:
     permissions:
       contents: write
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     needs: [create-release, build-tauri]
     steps:
       - name: Publish release
