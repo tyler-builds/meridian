@@ -195,3 +195,7 @@ scripts/          Build/release helper scripts
 Windows- and macOS-primary. Linux is best-effort: the AppImage is built and
 runs, but receives less testing, and some Windows-specific monitoring (per-tab
 browser memory attribution) is unavailable.
+
+## License
+
+Meridian is released under the [MIT License](LICENSE).

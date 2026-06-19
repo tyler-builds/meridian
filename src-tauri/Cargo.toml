@@ -1,10 +1,10 @@
 [package]
 name = "meridian"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
-license = ""
-repository = ""
+description = "A terminal-forward, agentic development environment."
+authors = ["tyler-builds"]
+license = "MIT"
+repository = "https://github.com/tyler-builds/meridian"
 edition = "2021"
 rust-version = "1.77.2"
 
