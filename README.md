@@ -32,7 +32,7 @@ lifting (terminals, process monitoring, Git, the language server) and a React
 frontend for the UI.
 
 <div align="center">
-  <img src="docs/screenshot.png" alt="Meridian in use" width="900" />
+  <img src="docs/screenshot-1.png" alt="Meridian in use" width="900" />
 </div>
 
 ## Features

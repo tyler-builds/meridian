@@ -50,6 +50,11 @@ keyring = { version = "3", features = ["windows-native", "apple-native", "sync-s
 # Cross-platform process enumeration (CPU% + RSS + parent links) powering the
 # Resource Manager status-bar item. We only ever walk our own process tree.
 sysinfo = "0.33"
+# Filesystem watching for live file-tree updates. The mini debouncer coalesces
+# rapid change bursts (file saves, branch switches, `npm install`) into a single
+# notification and re-exports `notify` itself. On Windows it uses a single
+# recursive ReadDirectoryChangesW handle per project root (cheap).
+notify-debouncer-mini = "0.4"
 
 # Windows-only: read WebView2's per-renderer-process frame URLs so the Resource
 # Manager can attribute each embedded browser tab to its project. Versions match

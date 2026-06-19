@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
+use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use tauri::{
@@ -55,9 +57,11 @@ const TREE_IGNORE: [&str; 8] = [
 ];
 const MAX_TREE_ENTRIES: usize = 20_000;
 
-/// Recursively collect relative POSIX file paths under `root`.
-/// Directories are derived by the tree from the file paths (path-first model),
-/// so only files are emitted.
+/// Recursively collect relative POSIX paths under `root`. Files are emitted as
+/// plain paths; non-empty directories are derived by the tree from their files
+/// (path-first model). An empty directory has no files to infer it from, so it
+/// is emitted explicitly with a trailing slash — the tree's directory marker —
+/// so empty dirs still appear.
 fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
     if depth > 12 || out.len() >= MAX_TREE_ENTRIES {
         return;
@@ -76,7 +80,17 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>, depth: usize) {
         let path = entry.path();
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
+            let before = out.len();
             walk(root, &path, out, depth + 1);
+            // The subtree added nothing, so it's empty: emit an explicit
+            // trailing-slash directory entry so it still shows. Only the
+            // shallowest empty dir in a chain needs emitting — its parents are
+            // inferred from the slash-delimited path.
+            if out.len() == before {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
+                }
+            }
         } else if let Ok(rel) = path.strip_prefix(root) {
             out.push(rel.to_string_lossy().replace('\\', "/"));
         }
@@ -99,6 +113,107 @@ async fn read_project_tree(path: String) -> Result<Vec<String>, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Holds one live filesystem watcher per project (keyed by a frontend-supplied
+/// id). Dropping a `Debouncer` stops its background thread and releases the OS
+/// watch, so removing an entry is all that's needed to unwatch.
+#[derive(Default)]
+struct TreeWatcherManager {
+    watchers: Mutex<HashMap<String, Debouncer<RecommendedWatcher>>>,
+}
+
+/// True when a changed path is one the tree would actually show — i.e. it isn't
+/// inside an ignored directory (node_modules/.git/build output). Mirrors `walk`'s
+/// filter so routine git/build/install churn under those dirs doesn't trigger a
+/// re-walk.
+fn tree_path_relevant(root: &Path, changed: &Path) -> bool {
+    let rel = changed.strip_prefix(root).unwrap_or(changed);
+    !rel
+        .components()
+        .any(|c| TREE_IGNORE.iter().any(|&ig| ig == c.as_os_str().to_string_lossy().as_ref()))
+}
+
+/// Start watching a project root for filesystem changes and emit the refreshed
+/// file list on `tree://change/{id}` whenever the set of paths changes. The
+/// debouncer coalesces bursts; changes confined to ignored dirs, and edits that
+/// don't alter the path set (a file's *contents* changing), are dropped so the
+/// frontend tree isn't rebuilt needlessly. Idempotent per id.
+#[tauri::command]
+async fn watch_project_tree(
+    app: AppHandle,
+    state: State<'_, TreeWatcherManager>,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    if state.watchers.lock().unwrap().contains_key(&id) {
+        return Ok(());
+    }
+    let root = PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("Not a directory: {path}"));
+    }
+
+    // Seed with the current tree so the first event (or a content-only change)
+    // doesn't re-emit an identical list — the frontend already has this from its
+    // initial `read_project_tree`. Walked off the main thread (same reason
+    // `read_project_tree` is async): a full disk walk can take seconds.
+    let seed_root = root.clone();
+    let seed = tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        walk(&seed_root, &seed_root, &mut out, 0);
+        out.sort();
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let last: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(seed));
+
+    let event_root = root.clone();
+    let event_name = format!("tree://change/{id}");
+    let app_handle = app.clone();
+
+    let mut debouncer = new_debouncer(
+        std::time::Duration::from_millis(300),
+        move |res: DebounceEventResult| {
+            // Errors (e.g. a watch-buffer overflow during a massive burst) are
+            // skipped; the next change re-syncs.
+            let Ok(events) = res else {
+                return;
+            };
+            if !events
+                .iter()
+                .any(|e| tree_path_relevant(&event_root, &e.path))
+            {
+                return;
+            }
+            let mut out = Vec::new();
+            walk(&event_root, &event_root, &mut out, 0);
+            out.sort();
+            let mut guard = last.lock().unwrap();
+            if *guard == out {
+                return; // only the contents of existing files changed
+            }
+            *guard = out.clone();
+            drop(guard);
+            let _ = app_handle.emit_to("main", &event_name, out);
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    debouncer
+        .watcher()
+        .watch(&root, RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+
+    state.watchers.lock().unwrap().insert(id, debouncer);
+    Ok(())
+}
+
+/// Stop watching a project root and release its OS watch.
+#[tauri::command]
+fn unwatch_project_tree(state: State<TreeWatcherManager>, id: String) {
+    state.watchers.lock().unwrap().remove(&id);
 }
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -2461,6 +2576,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(PtyManager::default())
+        .manage(TreeWatcherManager::default())
         .manage(LspManager::default())
         .manage(BrowserManager::default())
         .manage(ResourceMonitor::default())
@@ -2468,6 +2584,8 @@ pub fn run() {
         .manage(jira::JiraState::default())
         .invoke_handler(tauri::generate_handler![
             read_project_tree,
+            watch_project_tree,
+            unwatch_project_tree,
             read_file_text,
             write_file_text,
             prettier_format,

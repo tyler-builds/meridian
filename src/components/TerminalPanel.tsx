@@ -19,7 +19,10 @@ const TERMINAL_THEME = {
   foreground: "#e5e5e5",
   cursor: "#e5e5e5",
   cursorAccent: "#1c1c1c",
-  selectionBackground: "#3a3a3a",
+  // A clearly-visible selection: the old near-black #3a3a3a was almost
+  // indistinguishable from the #1c1c1c background, so selections (and thus what
+  // copy-on-select would grab) were invisible.
+  selectionBackground: "#4b5563",
   black: "#1c1c1c",
   red: "#e06c75",
   green: "#98c379",
@@ -87,6 +90,11 @@ export function TerminalPanel({
       cursorBlink: true,
       cursorStyle: "bar",
       scrollback: 10_000,
+      // When a fullscreen program (Claude Code) turns on mouse tracking, xterm
+      // sends mouse drags to the program instead of selecting text. Holding a
+      // modifier forces a local selection anyway: Shift+drag on Win/Linux (the
+      // built-in default), and Option+drag on macOS once this is enabled.
+      macOptionClickForcesSelection: true,
       theme: { ...TERMINAL_THEME },
       allowProposedApi: true,
       // Tell xterm the backend is ConPTY (portable-pty on Windows) so it doesn't
@@ -152,18 +160,46 @@ export function TerminalPanel({
     };
     el.addEventListener("paste", handlePaste, true);
 
-    // Let Ctrl+V / Ctrl+Shift+V (and Cmd+V) fall through to the browser's native
-    // paste instead of xterm turning Ctrl+V into a 0x16 control byte. The native
-    // paste fires the `paste` handler above (images) and xterm's own text paste —
-    // the same path right-click → Paste already used, which is why that worked
-    // while the shortcuts didn't. Every other key is left to xterm.
+    // Copy the current terminal selection to the system clipboard. Returns
+    // whether anything was copied. Used both by the copy keybinding below and by
+    // copy-on-select (the mouse-up handler) — releasing a selection drag is what
+    // delivers the "auto copy" behavior.
+    const copySelection = (): boolean => {
+      const sel = term.getSelection();
+      if (!sel) return false;
+      void navigator.clipboard.writeText(sel).catch(() => {
+        /* clipboard unavailable */
+      });
+      return true;
+    };
+
+    // Auto copy: a finished selection (mouse released) goes straight to the
+    // clipboard, so you never have to follow a drag with a copy command. A plain
+    // click clears the selection, so getSelection() is empty and this no-ops.
+    // Note: while Claude Code (or any program) has mouse tracking on, a *plain*
+    // drag is consumed by that program — hold Shift (Option on macOS) to select.
+    const handleMouseUp = () => {
+      copySelection();
+    };
+    el.addEventListener("mouseup", handleMouseUp);
+
+    // Keyboard copy/paste. Ctrl+Shift+C (Win/Linux) or Cmd+C (macOS) copies the
+    // selection; plain Ctrl+C is left untouched so it still sends SIGINT to the
+    // running program. Ctrl+V / Cmd+V fall through to the browser's native paste
+    // instead of xterm turning Ctrl+V into a 0x16 control byte — the native paste
+    // fires the `paste` handler above (images) and xterm's own text paste. Every
+    // other key is left to xterm.
     term.attachCustomKeyEventHandler((e) => {
-      if (
-        e.type === "keydown" &&
-        (e.ctrlKey || e.metaKey) &&
-        (e.key === "v" || e.key === "V")
-      ) {
-        return false; // skip xterm; browser performs the paste
+      if (e.type === "keydown") {
+        const copyChord =
+          ((e.ctrlKey && e.shiftKey) || (e.metaKey && !e.ctrlKey)) &&
+          (e.key === "c" || e.key === "C");
+        if (copyChord && copySelection()) {
+          return false; // handled — don't pass the chord to the program
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
+          return false; // skip xterm; browser performs the paste
+        }
       }
       return true;
     });
@@ -309,6 +345,7 @@ export function TerminalPanel({
     return () => {
       disposed = true;
       el.removeEventListener("paste", handlePaste, true);
+      el.removeEventListener("mouseup", handleMouseUp);
       resizeObserver.disconnect();
       unlistenOutput?.();
       unlistenExit?.();

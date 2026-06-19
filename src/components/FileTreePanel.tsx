@@ -47,8 +47,35 @@ export function FileTreePanel({
   });
   modelRef.current = model;
 
+  // `useFileTree` builds the model exactly once and intentionally ignores later
+  // `paths` changes (see its source), so live updates from the FS watcher — App
+  // hands us a fresh `paths` array on every add/delete/rename — won't show
+  // unless we push them into the model with `resetPaths`. Preserve which folders
+  // are expanded across the reset so an on-disk change doesn't collapse the tree
+  // the user is working in.
+  const prevPathsRef = useRef(paths);
+  useEffect(() => {
+    if (prevPathsRef.current === paths) return; // initial render, or no change
+    const dirs = new Set<string>();
+    for (const p of prevPathsRef.current) {
+      const parts = p.split("/");
+      for (let i = 1; i < parts.length; i += 1) {
+        dirs.add(parts.slice(0, i).join("/"));
+      }
+    }
+    const expanded: string[] = [];
+    for (const d of dirs) {
+      // getItem returns a file | directory union; only directories expand.
+      const item = model.getItem(d);
+      if (item && "isExpanded" in item && item.isExpanded()) expanded.push(d);
+    }
+    model.resetPaths(paths, { initialExpandedPaths: expanded });
+    prevPathsRef.current = paths;
+  }, [model, paths]);
+
   // Mirror the active editor tab into the tree selection. Clearing the
-  // selection when a file is closed lets clicking it again re-open it.
+  // selection when a file is closed lets clicking it again re-open it. Also runs
+  // after a `resetPaths` (paths changed), which drops the prior selection.
   useEffect(() => {
     const m = modelRef.current;
     if (!m) return;
@@ -63,7 +90,7 @@ export function FileTreePanel({
     } else {
       for (const p of current) m.getItem(p)?.deselect();
     }
-  }, [activeRelPath]);
+  }, [activeRelPath, paths]);
 
   return (
     <div className="h-full overflow-hidden text-[13px]">

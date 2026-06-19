@@ -3,9 +3,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MainTab, ProjectTab } from "@/types";
 import {
   findProjectFavicon,
+  frontendLog,
+  onProjectTreeChange,
   pickProjectFolder,
   readProjectTree,
+  unwatchProjectTree,
+  watchProjectTree,
 } from "@/lib/tauri";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { loadSession, saveSession } from "@/lib/session";
 import { setObstruction } from "@/lib/nativeSurface";
 import { useSettings } from "@/lib/settings";
@@ -619,6 +624,49 @@ export default function App() {
     if (!restoredRef.current) return;
     saveSession(tabs, activeTabId);
   }, [tabs, activeTabId]);
+
+  // Live file-tree updates: keep one recursive FS watcher per open project so the
+  // tree reflects files created/deleted/renamed on disk (the initial
+  // `readProjectTree` is a one-time snapshot). The Rust watcher debounces bursts
+  // and only emits when the set of paths actually changes. Reconciled against the
+  // open projects — new ones get a watcher, closed ones have theirs released.
+  // The map value is the event unlisten fn (a placeholder reserves the slot while
+  // the async listener attaches, so a project can't be double-watched).
+  const treeWatchersRef = useRef<Map<string, UnlistenFn>>(new Map());
+  useEffect(() => {
+    const watchers = treeWatchersRef.current;
+    const present = new Set(tabs.map((t) => t.id));
+
+    for (const t of tabs) {
+      if (watchers.has(t.id)) continue;
+      watchers.set(t.id, () => {}); // reserve while the listener attaches
+      const { id, path } = t;
+      void onProjectTreeChange(id, (paths) => {
+        setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, paths } : x)));
+      }).then((unlisten) => {
+        // Project closed during the async gap — undo and don't start the watcher.
+        if (!treeWatchersRef.current.has(id)) {
+          unlisten();
+          return;
+        }
+        treeWatchersRef.current.set(id, unlisten);
+        // Log a watch failure rather than swallowing it — a silent catch here is
+        // what made this watcher hard to debug.
+        void watchProjectTree(id, path).catch((e) =>
+          frontendLog("error", `watchProjectTree failed for ${id}: ${e}`),
+        );
+      });
+    }
+
+    for (const [id, unlisten] of [...watchers.entries()]) {
+      if (present.has(id)) continue;
+      unlisten();
+      watchers.delete(id);
+      void unwatchProjectTree(id).catch((e) =>
+        frontendLog("error", `unwatchProjectTree failed for ${id}: ${e}`),
+      );
+    }
+  }, [tabs]);
 
   // DOM overlays paint over the content area; native browser webviews ignore
   // DOM z-index, so flag these as obstructions to hide any visible webview

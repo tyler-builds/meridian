@@ -27,6 +27,33 @@ export function readProjectTree(path: string): Promise<string[]> {
   return invoke<string[]>("read_project_tree", { path });
 }
 
+/**
+ * Start a recursive filesystem watcher on a project root. When files are
+ * created/deleted/renamed on disk, the refreshed path list is emitted on
+ * `tree://change/{id}` (attach via `onProjectTreeChange`). `id` is an opaque,
+ * event-safe identifier (the project tab id). Idempotent per id.
+ */
+export function watchProjectTree(id: string, path: string): Promise<void> {
+  return invoke("watch_project_tree", { id, path });
+}
+
+/** Stop and release the filesystem watcher for `id`. */
+export function unwatchProjectTree(id: string): Promise<void> {
+  return invoke("unwatch_project_tree", { id });
+}
+
+/**
+ * Fired with the project's new relative POSIX file paths whenever its tree
+ * changes on disk. Only emits when the *set* of paths changes — content-only
+ * edits and churn under ignored dirs (node_modules/.git/build output) don't.
+ */
+export function onProjectTreeChange(
+  id: string,
+  cb: (paths: string[]) => void,
+): Promise<UnlistenFn> {
+  return listen<string[]>(`tree://change/${id}`, (e) => cb(e.payload));
+}
+
 /** Read a UTF-8 text file (project root + relative path) for the editor. */
 export function readFileText(root: string, rel: string): Promise<string> {
   return invoke<string>("read_file_text", { root, rel });
