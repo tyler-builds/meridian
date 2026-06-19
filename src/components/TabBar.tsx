@@ -91,7 +91,13 @@ function ProjectTabItem({
   return (
     <div
       ref={setNodeRef}
-      style={{ transform: CSS.Transform.toString(transform), transition }}
+      style={{
+        // Lock dragging to the horizontal axis: the tab strip is a horizontal
+        // list, but the dragged tab otherwise follows the pointer vertically too
+        // (the sort strategy only lays out the siblings, not the dragged item).
+        transform: CSS.Transform.toString(transform && { ...transform, y: 0 }),
+        transition,
+      }}
       {...attributes}
       {...listeners}
       onClick={() => onSelect(tab.id)}
