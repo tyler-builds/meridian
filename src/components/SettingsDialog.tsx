@@ -17,6 +17,7 @@ import { useUpdater } from "@/lib/updater";
 import { EDITOR_THEMES } from "@/lib/monaco";
 import { appVersion, getTauriVersion, openExternal } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import logoUrl from "@/assets/logo.png";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -436,9 +437,7 @@ function AboutSection() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-bg-active text-fg">
-          <span className="text-lg font-semibold">M</span>
-        </div>
+        <img src={logoUrl} alt="Meridian" className="h-12 w-12 rounded-xl" />
         <div className="flex flex-col">
           <span className="text-[15px] font-medium text-fg">Meridian</span>
           <span className="text-xs text-fg-subtle">

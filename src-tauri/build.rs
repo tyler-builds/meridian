@@ -1,5 +1,9 @@
 fn main() {
     inject_jira_credentials();
+    // Re-embed the Windows .exe icon whenever the app icon changes. Cargo does
+    // not rebuild on icon-only changes otherwise, so `tauri dev` keeps running a
+    // stale binary with the old taskbar icon after the icons are regenerated.
+    println!("cargo:rerun-if-changed=icons/icon.ico");
     tauri_build::build()
 }
 
