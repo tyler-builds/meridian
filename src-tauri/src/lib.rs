@@ -1924,11 +1924,73 @@ async fn browser_close(
 }
 
 #[tauri::command]
-async fn browser_get_url(app: AppHandle, id: String) -> Result<String, String> {
+async fn browser_get_url(
+    app: AppHandle,
+    state: State<'_, BrowserManager>,
+    id: String,
+) -> Result<String, String> {
     let webview = app
         .get_webview(&browser_label(&id))
         .ok_or_else(|| "browser not found".to_string())?;
-    webview.url().map(|u| u.to_string()).map_err(|e| e.to_string())
+    // Prefer the webview's live URL (catches in-page SPA navigations the
+    // on_navigation delegate never sees). When it isn't available yet — the
+    // window between tab creation and the first committed navigation — fall back
+    // to the URL on_navigation last recorded instead of letting the platform
+    // getter panic on an empty URL.
+    if let Some(url) = read_live_url(&webview) {
+        return Ok(url);
+    }
+    let url = state
+        .sessions
+        .lock()
+        .unwrap()
+        .get(&id)
+        .and_then(|s| s.history.get(s.index).cloned())
+        .unwrap_or_default();
+    Ok(url)
+}
+
+/// The webview's committed URL, or `None` when no navigation has committed yet.
+///
+/// On macOS, wry's `Webview::url()` calls `WKWebView.URL().unwrap()` on the main
+/// event-loop thread, which panics for an uncommitted webview. We read the
+/// `WKWebView` URL ourselves via `with_webview` so the null case is recoverable.
+/// Other platforms return a real `Result`, so the existing getter is used there.
+#[cfg(target_os = "macos")]
+fn read_live_url(webview: &tauri::Webview) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    webview
+        .with_webview(move |platform| {
+            use objc2_web_kit::WKWebView;
+            let ptr = platform.inner() as *mut WKWebView;
+            let url = if ptr.is_null() {
+                None
+            } else {
+                // SAFETY: `with_webview` runs this on the main thread with a live
+                // WKWebView for the lifetime of the call.
+                let wk: &WKWebView = unsafe { &*ptr };
+                unsafe { wk.URL() }
+                    .and_then(|u| u.absoluteString())
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+            };
+            let _ = tx.send(url);
+        })
+        .ok()?;
+    // The closure runs on the main thread; bound the wait so a busy main thread
+    // can't stall the command (the caller falls back to the tracked URL).
+    rx.recv_timeout(std::time::Duration::from_millis(500))
+        .ok()
+        .flatten()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_live_url(webview: &tauri::Webview) -> Option<String> {
+    webview
+        .url()
+        .ok()
+        .map(|u| u.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// One rate-limit window's state as reported by the Claude usage endpoint.
@@ -2570,7 +2632,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Persist window size/position/etc., but NOT decorations: the window's
+        // decorated state is a per-platform config decision (macOS uses the
+        // native title bar via titleBarStyle: Overlay; Windows/Linux are
+        // borderless with custom controls). Left in, the plugin would restore a
+        // stale `decorated` value saved from an earlier run and override the
+        // config — leaving macOS without traffic lights or rounded corners.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         // Self-update (desktop only): the frontend drives check/download via the
         // updater JS API; `process` provides the relaunch after install.
         .plugin(tauri_plugin_updater::Builder::new().build())

@@ -1,9 +1,7 @@
 import { FolderPlus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-
-const isMac =
-  typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+import { isMac } from "@/lib/utils";
 
 export function EmptyState({ onOpenProject }: { onOpenProject: () => void }) {
   return (

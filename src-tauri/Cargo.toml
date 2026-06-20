@@ -69,3 +69,11 @@ windows = { version = "0.61", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
+
+# macOS-only: read the WKWebView's committed URL directly, handling the null
+# case, so the embedded browser's address-bar reconcile never reaches wry's
+# url() getter — which unwraps an Option and panics on the main event-loop
+# thread when no navigation has committed yet (right after a tab is created or
+# during a slow load). Versions match the ones Tauri/wry already lock.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView"] }

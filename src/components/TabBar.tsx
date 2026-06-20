@@ -16,7 +16,7 @@ import { Copy, FolderCode, Plus, Settings, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { ProjectTab } from "@/types";
-import { cn } from "@/lib/utils";
+import { cn, isMac } from "@/lib/utils";
 import { WindowControls } from "@/components/WindowControls";
 
 /**
@@ -209,7 +209,12 @@ export function TabBar({
     // children below don't carry the attribute, so they stay clickable.
     <div
       data-tauri-drag-region
-      className="flex h-10 shrink-0 items-stretch border-b border-border bg-bg pl-2"
+      className={cn(
+        "flex h-10 shrink-0 items-stretch border-b border-border bg-bg",
+        // On macOS the native traffic lights overlay the top-left, so inset the
+        // tab strip clear of them; elsewhere the custom controls sit on the right.
+        isMac ? "pl-[78px]" : "pl-2",
+      )}
     >
       <DndContext
         sensors={sensors}
@@ -258,7 +263,9 @@ export function TabBar({
         <Settings size={16} strokeWidth={1.8} />
       </button>
 
-      <WindowControls />
+      {/* macOS uses native traffic lights (titleBarStyle: Overlay); our custom
+          min/max/close controls render only on Windows and Linux. */}
+      {!isMac && <WindowControls />}
 
       {menu && (
         <TabContextMenu

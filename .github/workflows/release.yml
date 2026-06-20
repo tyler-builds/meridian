@@ -5,8 +5,10 @@ name: Release build
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
-# The builds are unsigned: no Apple/Windows signing secrets are configured, so
-# no codesigning or notarization runs. First launch will warn —
+# The builds are not notarized: no Apple/Windows signing secrets are configured.
+# macOS apps are ad-hoc signed (bundle.macOS.signingIdentity "-" in
+# tauri.conf.json) so Gatekeeper shows the milder "unidentified developer"
+# prompt instead of "damaged and can't be opened". First launch will warn —
 #   macOS:   right-click the app -> Open  (Gatekeeper)
 #   Windows: More info -> Run anyway       (SmartScreen)
 
@@ -41,7 +43,7 @@ jobs:
               tag_name: process.env.TAG,
               name: `Meridian ${process.env.TAG}`,
               body: [
-                "Unsigned builds.",
+                "Ad-hoc signed builds (not notarized).",
                 "",
                 "- **macOS** (`aarch64` = Apple Silicon, `x64` = Intel): the first launch is blocked by Gatekeeper. Right-click the app and choose **Open**, then confirm.",
                 "- **Windows**: SmartScreen may warn on first run. Choose **More info → Run anyway**.",
