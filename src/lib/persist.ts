@@ -26,6 +26,7 @@ const KEYS = [
   "meridian.editorTheme",
   "meridian.lspEnabled",
   "meridian.dangerouslySkipPermissions",
+  "meridian.claudePath",
   "meridian.sidebarWidth",
   "meridian.sidebarCollapsed",
   "meridian.browserHistory",

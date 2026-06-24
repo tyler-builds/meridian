@@ -19,15 +19,14 @@ import { cn } from "@/lib/utils";
 import { setObstruction } from "@/lib/nativeSurface";
 import { FileTypeIcon } from "@/components/FileTypeIcon";
 import { ClaudeIcon } from "@/components/ClaudeIcon";
+import { isClaudeCommand } from "@/lib/claude";
 
 /** A Claude tab is a terminal tab whose pane auto-runs the `claude` command. */
 function isClaudeTab(tab: MainTab): boolean {
   return (
     tab.kind === "terminal" &&
     !!tab.initialCommands &&
-    Object.values(tab.initialCommands).some(
-      (c) => c === "claude" || c.startsWith("claude "),
-    )
+    Object.values(tab.initialCommands).some(isClaudeCommand)
   );
 }
 import {

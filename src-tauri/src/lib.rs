@@ -46,6 +46,21 @@ struct LspManager {
     sessions: Mutex<HashMap<String, LspSession>>,
 }
 
+/// The user's real login-shell `PATH`, resolved once at startup.
+///
+/// A GUI app launched from Finder/Dock inherits a minimal `PATH` that omits the
+/// Homebrew/npm directories most CLI tools install into — those are added by
+/// `~/.zprofile` (e.g. `eval "$(brew shellenv)"`), which only a *login* shell
+/// sources. The PTY spawns its shell non-login, so `claude` and friends aren't
+/// found even though they work in the user's own terminal. We resolve the real
+/// `PATH` from the login shell once and inject it into every PTY. `None` on
+/// Windows (GUI apps inherit the full `PATH` there) and when resolution fails or
+/// times out — callers fall back to the inherited `PATH`.
+#[derive(Default)]
+struct ResolvedEnv {
+    path: Mutex<Option<String>>,
+}
+
 const TREE_IGNORE: [&str; 8] = [
     "node_modules",
     ".git",
@@ -1113,6 +1128,61 @@ fn default_shell() -> String {
     }
 }
 
+/// The current user's home directory, used to probe well-known install paths.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// Resolve the user's real login-shell `PATH` (see `ResolvedEnv`). Runs the
+/// login shell as an *interactive login* shell (`-ilc`) so it sources both
+/// `~/.zprofile` (Homebrew's `PATH`) and `~/.zshrc`, then prints `$PATH` behind a
+/// sentinel so profile chatter — banners, the `oh-my-posh`/autosuggestions errors
+/// seen in the wild — can't corrupt the value. Guarded by a timeout so a hanging
+/// profile can't block startup. `None` on Windows, on timeout, or on any failure.
+#[cfg(not(target_os = "windows"))]
+fn resolve_login_path() -> Option<String> {
+    use std::sync::mpsc;
+
+    const SENTINEL: &str = "__MERIDIAN_PATH__";
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+
+    // Run the probe off-thread so a misbehaving profile (one that blocks on
+    // input or never returns) can't hang the resolver past the timeout below.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let script = format!("printf '%s%s\\n' '{SENTINEL}' \"$PATH\"");
+        let out = Command::new(&shell)
+            .args(["-ilc", &script])
+            .stdin(Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .ok()?
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(SENTINEL))?
+        .trim()
+        .to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_login_path() -> Option<String> {
+    None
+}
+
 /// A shell the user can choose for new terminals.
 #[derive(serde::Serialize)]
 struct ShellInfo {
@@ -1161,6 +1231,57 @@ fn list_shells() -> Vec<ShellInfo> {
         .collect()
 }
 
+/// Locate the `claude` binary for the "Claude binary path" setting's auto-detect.
+///
+/// Searches the resolved login `PATH` first — the inherited process `PATH` is the
+/// very thing that's often missing Homebrew/npm dirs — then probes well-known
+/// install locations a `PATH` search would still miss. Returns the first match
+/// that exists, or `None` so the UI can prompt for a manual path.
+#[tauri::command]
+fn detect_claude_path(resolved: State<ResolvedEnv>) -> Option<String> {
+    let exe = if cfg!(target_os = "windows") {
+        "claude.cmd"
+    } else {
+        "claude"
+    };
+
+    // 1. Resolve on PATH (the login PATH if we have it, else the process PATH).
+    let login_path = resolved.path.lock().unwrap().clone();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let on_path = match &login_path {
+        Some(p) => which::which_in("claude", Some(p), &cwd).ok(),
+        None => which::which("claude").ok(),
+    };
+    if let Some(p) = on_path {
+        return Some(p.to_string_lossy().into_owned());
+    }
+
+    // 2. Probe well-known locations (Homebrew, the native installer, npm globals).
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/opt/homebrew/bin").join(exe),
+        PathBuf::from("/usr/local/bin").join(exe),
+    ];
+    if let Some(home) = home_dir() {
+        candidates.push(home.join(".claude/local").join(exe));
+        candidates.push(home.join(".local/bin").join(exe));
+        candidates.push(home.join(".npm-global/bin").join(exe));
+        #[cfg(target_os = "windows")]
+        candidates.push(home.join("AppData/Roaming/npm").join(exe));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// True if `path` points at an existing file, for live validation feedback in
+/// the "Claude binary path" setting. An empty path is "not set", not invalid.
+#[tauri::command]
+fn validate_claude_path(path: String) -> bool {
+    let trimmed = path.trim();
+    !trimmed.is_empty() && Path::new(trimmed).is_file()
+}
+
 /// Use the requested shell if it's non-empty and resolvable, else the default.
 fn resolve_shell(shell: Option<String>) -> String {
     match shell {
@@ -1173,6 +1294,7 @@ fn resolve_shell(shell: Option<String>) -> String {
 fn pty_spawn(
     app: AppHandle,
     state: State<PtyManager>,
+    resolved: State<ResolvedEnv>,
     id: String,
     cwd: String,
     cols: u16,
@@ -1193,6 +1315,14 @@ fn pty_spawn(
     let mut cmd = CommandBuilder::new(resolve_shell(shell));
     if Path::new(&cwd).is_dir() {
         cmd.cwd(&cwd);
+    }
+    // Baseline PATH from the user's login shell (see ResolvedEnv) so PTYs can find
+    // Homebrew/npm tools like `claude` even when Meridian was launched from
+    // Finder/Dock with a minimal PATH. Set before the per-tab env below so an
+    // explicit override still wins, and before spawn so the shell's own startup
+    // files can still prepend/append to it as usual.
+    if let Some(path) = resolved.path.lock().unwrap().as_ref() {
+        cmd.env("PATH", path);
     }
     // Extra environment for the shell (and anything it launches, e.g. a Claude
     // tab sets CLAUDE_CODE_NO_FLICKER so `claude` starts in fullscreen).
@@ -3181,6 +3311,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(PtyManager::default())
+        .manage(ResolvedEnv::default())
         .manage(TreeWatcherManager::default())
         .manage(LspManager::default())
         .manage(BrowserManager::default())
@@ -3211,6 +3342,8 @@ pub fn run() {
             read_state,
             write_state,
             list_shells,
+            detect_claude_path,
+            validate_claude_path,
             pty_spawn,
             pty_write,
             pty_resize,
@@ -3285,6 +3418,17 @@ pub fn run() {
                 }
                 None => log::warn!("MCP browser server failed to start; @browser disabled"),
             }
+            // Resolve the login-shell PATH off the main thread (see ResolvedEnv)
+            // so a slow profile can't delay window paint. PTYs opened before it
+            // lands just use the inherited PATH, as before; in practice the user
+            // opens a terminal seconds later, by which point it's ready.
+            let env_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Some(path) = resolve_login_path() {
+                    log::info!("resolved login PATH ({} chars)", path.len());
+                    *env_handle.state::<ResolvedEnv>().path.lock().unwrap() = Some(path);
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

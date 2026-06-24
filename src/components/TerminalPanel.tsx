@@ -14,6 +14,7 @@ import {
   savePastedImage,
 } from "@/lib/tauri";
 import { registerTerminal, unregisterTerminal } from "@/lib/terminalRegistry";
+import { isClaudeCommand } from "@/lib/claude";
 
 const TERMINAL_THEME = {
   background: "#1c1c1c",
@@ -319,8 +320,7 @@ export function TerminalPanel({
       // A Claude tab launches `claude` as its initial command; start it in
       // fullscreen (alternate-screen) rendering by default. Scoped to this
       // pane's shell, so plain terminal tabs are unaffected.
-      const isClaude =
-        initialCommand === "claude" || initialCommand?.startsWith("claude ");
+      const isClaude = isClaudeCommand(initialCommand);
       const env = isClaude ? { CLAUDE_CODE_NO_FLICKER: "1" } : undefined;
       try {
         await ptySpawn(ptyId, cwd, term.cols, term.rows, shell, env);

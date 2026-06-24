@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import {
+  detectClaudePath,
   jiraConnect,
   jiraDisconnect,
   jiraStatus,
@@ -41,6 +42,17 @@ interface SettingsContextValue {
   /** Run the `claude` command with --dangerously-skip-permissions. */
   dangerouslySkipPermissions: boolean;
   setDangerouslySkipPermissions: (value: boolean) => void;
+  /**
+   * User-specified absolute path to the `claude` binary. Empty means "auto":
+   * use `detectedClaudePath` if found, else the bare `claude` command on PATH.
+   * Set this when Claude tabs report "command not found".
+   */
+  claudePath: string;
+  setClaudePath: (value: string) => void;
+  /** Auto-detected `claude` path (backend probe), or "" if none was found. */
+  detectedClaudePath: string;
+  /** The path Claude tabs actually launch: `claudePath` if set, else detected. */
+  effectiveClaudePath: string;
   /**
    * Let the in-app Claude see and control this app's embedded browser tabs via
    * the `@browser` MCP server (list/read tabs, navigate, click, screenshot).
@@ -102,6 +114,12 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [dangerouslySkipPermissions, setDangerSkipState] = useState<boolean>(
     () => persist.getItem("meridian.dangerouslySkipPermissions") === "1",
   );
+  // Empty by default — the backend auto-detects `claude`. A non-empty value is
+  // an explicit override (e.g. when the install lives off the resolved PATH).
+  const [claudePath, setClaudePathState] = useState<string>(
+    () => persist.getItem("meridian.claudePath") ?? "",
+  );
+  const [detectedClaudePath, setDetectedClaudePath] = useState<string>("");
   // On by default — gives the in-app Claude `@browser` access to the embedded
   // browser tabs (browser tools are auto-allowed per project; the localhost
   // endpoint is gated by a per-install secret).
@@ -164,10 +182,33 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Probe for the `claude` binary once on startup so the setting can show what
+  // it found (and use it as the launch path when the user hasn't set one).
+  useEffect(() => {
+    let active = true;
+    void detectClaudePath()
+      .then((p) => {
+        if (active) setDetectedClaudePath(p ?? "");
+      })
+      .catch(() => {
+        /* detection is best-effort; the field falls back to bare `claude` */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const setShellProgram = (program: string) => {
     persist.setItem(STORAGE_KEY, program);
     setShellProgramState(program);
   };
+
+  const setClaudePath = (value: string) => {
+    persist.setItem("meridian.claudePath", value);
+    setClaudePathState(value);
+  };
+
+  const effectiveClaudePath = claudePath.trim() || detectedClaudePath;
 
   const setShowMinimap = (value: boolean) => {
     persist.setItem("meridian.showMinimap", value ? "1" : "0");
@@ -262,6 +303,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setLspEnabled,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
+        claudePath,
+        setClaudePath,
+        detectedClaudePath,
+        effectiveClaudePath,
         browserMcpEnabled,
         setBrowserMcpEnabled,
         browserMcpEvalJs,

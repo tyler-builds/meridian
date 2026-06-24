@@ -13,6 +13,7 @@ import {
   type PickedElement,
 } from "@/lib/tauri";
 import { bracketedPaste, injectIntoTerminal } from "@/lib/terminalRegistry";
+import { claudeBaseCommand, isClaudeCommand } from "@/lib/claude";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { loadSession, saveSession } from "@/lib/session";
 import { setObstruction } from "@/lib/nativeSurface";
@@ -46,8 +47,13 @@ const SIDEBAR_MAX = 560;
 const SIDEBAR_DEFAULT = 264;
 
 export default function App() {
-  const { dangerouslySkipPermissions, browserMcpEnabled, browserMcpEvalJs } =
-    useSettings();
+  const {
+    dangerouslySkipPermissions,
+    browserMcpEnabled,
+    browserMcpEvalJs,
+    effectiveClaudePath,
+    shellProgram,
+  } = useSettings();
   const [tabs, setTabs] = useState<ProjectTab[]>([]);
   // Live mirror of `tabs` so callbacks can read the current project list without
   // taking `tabs` as a dependency (which would re-create them on every change).
@@ -206,9 +212,13 @@ export default function App() {
   const newClaude = useCallback(
     async (projectId: string) => {
       const paneId = newPaneId();
+      // Launch via the configured/auto-detected binary path (falls back to the
+      // bare `claude` command on PATH). Detection fixes the common case where a
+      // GUI-launched app can't see Homebrew/npm's `claude`.
+      const base = claudeBaseCommand(effectiveClaudePath, shellProgram);
       let command = dangerouslySkipPermissions
-        ? "claude --dangerously-skip-permissions"
-        : "claude";
+        ? `${base} --dangerously-skip-permissions`
+        : base;
 
       // Wire up `@browser`: generate a project-scoped MCP config and launch
       // `claude` pointed at it, auto-allowing the browser tools. Best-effort —
@@ -252,7 +262,14 @@ export default function App() {
         activeMainTabId: newTab.id,
       }));
     },
-    [updateProject, dangerouslySkipPermissions, browserMcpEnabled, browserMcpEvalJs],
+    [
+      updateProject,
+      dangerouslySkipPermissions,
+      browserMcpEnabled,
+      browserMcpEvalJs,
+      effectiveClaudePath,
+      shellProgram,
+    ],
   );
 
   // An element picked in a browser tab's selector mode → paste it as context
@@ -264,21 +281,20 @@ export default function App() {
       const project = tabsRef.current.find((t) => t.id === projectId);
       if (!project) return false;
 
-      const isClaudeCmd = (c: string) =>
-        c === "claude" || c.startsWith("claude ");
       // A terminal tab whose initial command launched Claude. Prefer the active
       // tab when it qualifies, else the most recently opened Claude tab.
       const claudeTabs = project.mainTabs.filter(
         (m) =>
           m.kind === "terminal" &&
           !!m.initialCommands &&
-          Object.values(m.initialCommands).some(isClaudeCmd),
+          Object.values(m.initialCommands).some(isClaudeCommand),
       );
       const chosen =
         claudeTabs.find((m) => m.id === project.activeMainTabId) ??
         claudeTabs[claudeTabs.length - 1];
       const cmds = chosen?.initialCommands;
-      const paneId = cmds && Object.keys(cmds).find((p) => isClaudeCmd(cmds[p]));
+      const paneId =
+        cmds && Object.keys(cmds).find((p) => isClaudeCommand(cmds[p]));
       if (!chosen || !paneId) {
         void frontendLog(
           "warn",

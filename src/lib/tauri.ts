@@ -394,6 +394,32 @@ export function listShells(): Promise<ShellInfo[]> {
   return invoke<ShellInfo[]>("list_shells");
 }
 
+// --- Claude binary ---
+
+/**
+ * Auto-detect the `claude` binary's absolute path: searches the resolved login
+ * PATH, then well-known install locations. Returns null if nothing is found (the
+ * user must then set the path manually). Backs the "Claude binary path" setting.
+ */
+export function detectClaudePath(): Promise<string | null> {
+  return invoke<string | null>("detect_claude_path");
+}
+
+/** True if `path` points at an existing file (live validation for the setting). */
+export function validateClaudePath(path: string): Promise<boolean> {
+  return invoke<boolean>("validate_claude_path", { path });
+}
+
+/** Open the native file picker to choose the Claude binary. Null if cancelled. */
+export async function pickClaudeBinary(): Promise<string | null> {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    title: "Select Claude binary",
+  });
+  return typeof selected === "string" ? selected : null;
+}
+
 // --- PTY ---
 
 /**

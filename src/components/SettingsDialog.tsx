@@ -3,9 +3,11 @@ import {
   Cable,
   Check,
   Code2,
+  FolderOpen,
   GitCompare,
   Info,
   Loader2,
+  Search,
   Terminal,
   TriangleAlert,
   X,
@@ -15,7 +17,14 @@ import {
 import { useSettings } from "@/lib/settings";
 import { useUpdater } from "@/lib/updater";
 import { EDITOR_THEMES } from "@/lib/monaco";
-import { appVersion, getTauriVersion, openExternal } from "@/lib/tauri";
+import {
+  appVersion,
+  detectClaudePath,
+  getTauriVersion,
+  openExternal,
+  pickClaudeBinary,
+  validateClaudePath,
+} from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import logoUrl from "@/assets/logo.png";
 import { Switch } from "@/components/ui/switch";
@@ -58,7 +67,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="flex h-[460px] w-[680px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-xl border border-border bg-bg-elevated shadow-2xl"
+        className="flex h-[560px] w-[840px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-xl border border-border bg-bg-elevated shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4">
@@ -136,6 +145,139 @@ function SettingRow({
   );
 }
 
+/** Small square icon button used by the Claude-path row (Detect / Browse). */
+function IconButton({
+  title,
+  onClick,
+  busy,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  busy?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      disabled={busy}
+      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      {busy ? (
+        <Loader2 size={14} strokeWidth={2} className="animate-spin" />
+      ) : (
+        children
+      )}
+    </button>
+  );
+}
+
+/**
+ * "Claude binary path" setting. Empty means auto-detect (the placeholder/hint
+ * shows what the backend found); a value is an explicit override. Validates the
+ * path live, and offers Detect (re-probe) and Browse (file picker) actions.
+ */
+function ClaudeBinaryRow() {
+  const { claudePath, setClaudePath, detectedClaudePath } = useSettings();
+  const [valid, setValid] = useState<boolean | null>(null);
+  const [detecting, setDetecting] = useState(false);
+
+  useEffect(() => {
+    const path = claudePath.trim();
+    if (!path) {
+      setValid(null);
+      return;
+    }
+    let active = true;
+    const t = setTimeout(() => {
+      void validateClaudePath(path).then((ok) => {
+        if (active) setValid(ok);
+      });
+    }, 300);
+    return () => {
+      active = false;
+      clearTimeout(t);
+    };
+  }, [claudePath]);
+
+  const detect = async () => {
+    setDetecting(true);
+    try {
+      const found = await detectClaudePath();
+      if (found) setClaudePath(found);
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const browse = async () => {
+    const picked = await pickClaudeBinary();
+    if (picked) setClaudePath(picked);
+  };
+
+  let hint: ReactNode;
+  if (claudePath.trim()) {
+    hint =
+      valid === false ? (
+        <span className="flex items-center gap-1 text-amber-400">
+          <TriangleAlert size={11} strokeWidth={2.5} /> No file at this path
+        </span>
+      ) : valid ? (
+        <span className="flex items-center gap-1 text-emerald-400">
+          <Check size={11} strokeWidth={2.5} /> Valid binary
+        </span>
+      ) : (
+        <span className="text-fg-faint">Checking…</span>
+      );
+  } else if (detectedClaudePath) {
+    hint = (
+      <span
+        className="truncate font-mono text-fg-faint"
+        title={detectedClaudePath}
+      >
+        Auto-detected: {detectedClaudePath}
+      </span>
+    );
+  } else {
+    hint = (
+      <span className="text-amber-400">
+        Not found automatically — set the path manually.
+      </span>
+    );
+  }
+
+  return (
+    <SettingRow
+      title="Claude binary path"
+      description="Path to the claude executable. Leave blank to auto-detect. Set this if Claude tabs report “command not found”."
+    >
+      <div className="flex flex-col items-end gap-1.5">
+        <div className="flex items-center gap-1.5">
+          <input
+            value={claudePath}
+            onChange={(e) => setClaudePath(e.target.value)}
+            placeholder={detectedClaudePath || "claude"}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            className="h-8 w-52 rounded-md border border-border bg-bg px-2.5 font-mono text-[12px] text-fg outline-none placeholder:text-fg-faint focus:border-accent"
+          />
+          <IconButton title="Detect" onClick={() => void detect()} busy={detecting}>
+            <Search size={14} strokeWidth={2} />
+          </IconButton>
+          <IconButton title="Browse…" onClick={() => void browse()}>
+            <FolderOpen size={14} strokeWidth={2} />
+          </IconButton>
+        </div>
+        <div className="max-w-[244px] truncate text-[11px]">{hint}</div>
+      </div>
+    </SettingRow>
+  );
+}
+
 function TerminalSection() {
   const {
     shells,
@@ -175,6 +317,7 @@ function TerminalSection() {
           </SelectContent>
         </Select>
       </SettingRow>
+      <ClaudeBinaryRow />
       <SettingRow
         title="Allow Dangerously Skip Permissions"
         description="Launch Claude tabs with --dangerously-skip-permissions, bypassing its permission prompts. Only enable if you understand the risks."
