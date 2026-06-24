@@ -55,6 +55,14 @@ sysinfo = "0.33"
 # notification and re-exports `notify` itself. On Windows it uses a single
 # recursive ReadDirectoryChangesW handle per project root (cheap).
 notify-debouncer-mini = "0.4"
+# Minimal blocking HTTP/1.1 server powering the in-process MCP endpoint the
+# in-app `claude` connects to for the `@browser` feature (see mcp.rs). Bound to
+# 127.0.0.1 only; each request is gated by a per-install bearer secret.
+tiny_http = "0.12"
+# OS CSPRNG for the per-install MCP bearer secret (the only thing standing
+# between a localhost-bound port and any other local process driving the
+# browser, since browser tools are auto-allowed per project).
+getrandom = "0.2"
 
 # Windows-only: read WebView2's per-renderer-process frame URLs so the Resource
 # Manager can attribute each embedded browser tab to its project. Versions match
@@ -68,6 +76,10 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    # IStream + CreateStreamOnHGlobal, used to capture an embedded browser tab's
+    # PNG snapshot from WebView2's CapturePreview for the MCP screenshot tool.
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
 ] }
 
 # macOS-only: read the WKWebView's committed URL directly, handling the null

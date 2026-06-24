@@ -13,6 +13,7 @@ import {
   ptyWrite,
   savePastedImage,
 } from "@/lib/tauri";
+import { registerTerminal, unregisterTerminal } from "@/lib/terminalRegistry";
 
 const TERMINAL_THEME = {
   background: "#1c1c1c",
@@ -46,12 +47,16 @@ const TERMINAL_THEME = {
  * Recreated when `cwd` or `shell` changes.
  */
 export function TerminalPanel({
+  paneId,
   cwd,
   shell,
   initialCommand,
   onExit,
   onClaudeAttention,
 }: {
+  /** Stable pane id, used to register this terminal's PTY writer so other
+   * features (the browser element picker) can paste context into it. */
+  paneId?: string;
   cwd: string;
   shell: string;
   /** A command run once after the shell starts (e.g. `claude`). */
@@ -77,6 +82,11 @@ export function TerminalPanel({
 
     let disposed = false;
     const ptyId = crypto.randomUUID();
+    // Expose a writer for this pane so the browser element picker can paste page
+    // context straight into a running Claude session. Writes before the PTY
+    // spawns are a backend no-op, so registering early is safe.
+    const inject = (data: string) => void ptyWrite(ptyId, data);
+    if (paneId) registerTerminal(paneId, inject);
     let spawned = false;
     let unlistenOutput: (() => void) | undefined;
     let unlistenExit: (() => void) | undefined;
@@ -344,6 +354,7 @@ export function TerminalPanel({
 
     return () => {
       disposed = true;
+      if (paneId) unregisterTerminal(paneId, inject);
       el.removeEventListener("paste", handlePaste, true);
       el.removeEventListener("mouseup", handleMouseUp);
       resizeObserver.disconnect();
@@ -354,7 +365,7 @@ export function TerminalPanel({
       webgl = undefined;
       term.dispose();
     };
-  }, [cwd, shell, initialCommand]);
+  }, [paneId, cwd, shell, initialCommand]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 }

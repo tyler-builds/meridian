@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
+import { ArrowLeft, ArrowRight, RotateCw, SquareMousePointer } from "lucide-react";
 
 import {
   browserBack,
@@ -8,14 +8,20 @@ import {
   browserForward,
   browserGetUrl,
   browserNavigate,
+  browserPickStart,
+  browserPickStop,
+  browserPickToast,
   browserReload,
+  browserSetActive,
   browserSetBounds,
   browserShow,
   browserHide,
   onBrowserNavState,
   onBrowserNewTab,
+  onBrowserPick,
   onBrowserTitle,
   type BrowserNavState,
+  type PickedElement,
 } from "@/lib/tauri";
 import { useNativeSurfaceBounds } from "@/lib/useNativeSurfaceBounds";
 import { setObstruction, useSurfaceClear } from "@/lib/nativeSurface";
@@ -42,19 +48,26 @@ function normalizeUrl(input: string): string | null {
 export function BrowserPanel({
   id,
   initialUrl,
+  projectRoot,
   active,
   onUrlChange,
   onTitleChange,
   onOpenUrl,
+  onPickElement,
 }: {
   id: string;
   initialUrl: string;
+  /** Owning project root, so the MCP server can scope tabs to a Claude session. */
+  projectRoot: string;
   /** This browser is the active tab of the active project. */
   active: boolean;
   onUrlChange: (url: string) => void;
   onTitleChange: (title: string) => void;
   /** The page requested a new tab (window.open / target=_blank). */
   onOpenUrl: (url: string) => void;
+  /** The user picked a page element in selector mode — send it to Claude.
+   * Returns whether it was delivered, so we can confirm with an in-page toast. */
+  onPickElement: (element: PickedElement) => boolean;
 }) {
   const placeholderRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -70,6 +83,8 @@ export function BrowserPanel({
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showSuggest, setShowSuggest] = useState(false);
   const [highlight, setHighlight] = useState(-1);
+  // Element-selector mode: hovering outlines elements, a click grabs one.
+  const [picking, setPicking] = useState(false);
 
   const surfaceClear = useSurfaceClear();
   const visible = active && surfaceClear;
@@ -84,6 +99,10 @@ export function BrowserPanel({
   onTitleChangeRef.current = onTitleChange;
   const onOpenUrlRef = useRef(onOpenUrl);
   onOpenUrlRef.current = onOpenUrl;
+  const onPickElementRef = useRef(onPickElement);
+  onPickElementRef.current = onPickElement;
+  const pickingRef = useRef(picking);
+  pickingRef.current = picking;
   // Last URL we reflected, so on_navigation events and the reconcile poll don't
   // redundantly re-report the same URL.
   const lastUrlRef = useRef(initialUrl);
@@ -145,7 +164,15 @@ export function BrowserPanel({
       });
       if (disposed) return;
       try {
-        await browserCreate(id, initialUrl, r.left, r.top, r.width, r.height);
+        await browserCreate(
+          id,
+          initialUrl,
+          projectRoot,
+          r.left,
+          r.top,
+          r.width,
+          r.height,
+        );
         if (disposed) {
           void browserClose(id);
           return;
@@ -199,6 +226,63 @@ export function BrowserPanel({
       void browserHide(id);
     }
   }, [visible, created, id]);
+
+  // Tell the backend which tab is the active one in its project, so the MCP
+  // browser tools (read_tab/screenshot) default to the tab the user is viewing.
+  // Keyed on `active` (the active tab of the active project), not `visible` —
+  // a transient obstruction (the address suggestions popup) shouldn't count as
+  // switching away from this tab.
+  useEffect(() => {
+    if (created) void browserSetActive(id, active);
+  }, [active, created, id]);
+
+  // Receive the element captured in selector mode (or a cancel). A real pick is
+  // handed to the parent (→ pasted into Claude) and confirmed with an in-page
+  // toast; selector mode stays on so the user can pick several in a row. Only a
+  // cancel (Escape) exits the mode.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void onBrowserPick(id, (element) => {
+      if (!element) {
+        setPicking(false);
+        return;
+      }
+      const added = onPickElementRef.current(element);
+      void browserPickToast(
+        id,
+        added ? "Added to prompt" : "No Claude tab open — open one first",
+      );
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [id]);
+
+  // A navigation/reload wipes the injected picker script (and an in-page SPA
+  // route change leaves it stale), so leave selector mode when the URL changes —
+  // tearing down the script too, but only if we were actually picking (avoids a
+  // spurious stop call before the webview exists on first mount).
+  useEffect(() => {
+    if (pickingRef.current) {
+      void browserPickStop(id);
+      setPicking(false);
+    }
+  }, [nav.url, id]);
+
+  const togglePick = useCallback(() => {
+    if (pickingRef.current) {
+      void browserPickStop(id);
+      setPicking(false);
+    } else {
+      void browserPickStart(id);
+      setPicking(true);
+    }
+  }, [id]);
 
   // on_navigation misses in-page navigations (SPA pushState/replaceState, hash
   // changes), so the address bar can drift after a site auto-navigates. Poll
@@ -372,6 +456,24 @@ export function BrowserPanel({
             </ul>
           )}
         </div>
+        <button
+          onClick={togglePick}
+          className={cn(
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors",
+            picking
+              ? "bg-accent text-white"
+              : "text-fg-subtle hover:bg-bg-hover hover:text-fg",
+          )}
+          aria-label="Select element"
+          aria-pressed={picking}
+          title={
+            picking
+              ? "Cancel element selection (Esc)"
+              : "Select a page element to send to Claude"
+          }
+        >
+          <SquareMousePointer size={15} strokeWidth={1.8} />
+        </button>
       </div>
 
       {/* Anchor for the native webview surface. */}

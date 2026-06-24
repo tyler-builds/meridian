@@ -108,6 +108,7 @@ export function TerminalSplit({
             )}
           >
             <TerminalPanel
+              paneId={id}
               cwd={cwd}
               shell={shell}
               initialCommand={initialCommands?.[id]}

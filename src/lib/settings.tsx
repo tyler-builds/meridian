@@ -41,6 +41,19 @@ interface SettingsContextValue {
   /** Run the `claude` command with --dangerously-skip-permissions. */
   dangerouslySkipPermissions: boolean;
   setDangerouslySkipPermissions: (value: boolean) => void;
+  /**
+   * Let the in-app Claude see and control this app's embedded browser tabs via
+   * the `@browser` MCP server (list/read tabs, navigate, click, screenshot).
+   */
+  browserMcpEnabled: boolean;
+  setBrowserMcpEnabled: (value: boolean) => void;
+  /**
+   * Additionally expose the `eval_js` tool, letting Claude run arbitrary
+   * JavaScript in a page. Powerful and risky (can read page secrets) — off by
+   * default, independent of the master toggle.
+   */
+  browserMcpEvalJs: boolean;
+  setBrowserMcpEvalJs: (value: boolean) => void;
   /** Diff view: stacked (unified) vs side-by-side (split). */
   diffStyle: "unified" | "split";
   setDiffStyle: (value: "unified" | "split") => void;
@@ -88,6 +101,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // Off by default — this bypasses Claude's permission prompts.
   const [dangerouslySkipPermissions, setDangerSkipState] = useState<boolean>(
     () => persist.getItem("meridian.dangerouslySkipPermissions") === "1",
+  );
+  // On by default — gives the in-app Claude `@browser` access to the embedded
+  // browser tabs (browser tools are auto-allowed per project; the localhost
+  // endpoint is gated by a per-install secret).
+  const [browserMcpEnabled, setBrowserMcpEnabledState] = useState<boolean>(
+    () => persist.getItem("meridian.browserMcpEnabled") !== "0",
+  );
+  // Off by default — arbitrary JS execution in a page is the most dangerous tool.
+  const [browserMcpEvalJs, setBrowserMcpEvalJsState] = useState<boolean>(
+    () => persist.getItem("meridian.browserMcpEvalJs") === "1",
   );
   // Diff view preferences (default: unified, no wrap, show whitespace).
   const [diffStyle, setDiffStyleState] = useState<"unified" | "split">(() =>
@@ -174,6 +197,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setDangerSkipState(value);
   };
 
+  const setBrowserMcpEnabled = (value: boolean) => {
+    persist.setItem("meridian.browserMcpEnabled", value ? "1" : "0");
+    setBrowserMcpEnabledState(value);
+  };
+
+  const setBrowserMcpEvalJs = (value: boolean) => {
+    persist.setItem("meridian.browserMcpEvalJs", value ? "1" : "0");
+    setBrowserMcpEvalJsState(value);
+  };
+
   const setDiffStyle = (value: "unified" | "split") => {
     persist.setItem("meridian.diffStyle", value);
     setDiffStyleState(value);
@@ -229,6 +262,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setLspEnabled,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
+        browserMcpEnabled,
+        setBrowserMcpEnabled,
+        browserMcpEvalJs,
+        setBrowserMcpEvalJs,
         diffStyle,
         setDiffStyle,
         diffWrap,

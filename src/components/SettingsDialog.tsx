@@ -143,6 +143,10 @@ function TerminalSection() {
     setShellProgram,
     dangerouslySkipPermissions,
     setDangerouslySkipPermissions,
+    browserMcpEnabled,
+    setBrowserMcpEnabled,
+    browserMcpEvalJs,
+    setBrowserMcpEvalJs,
   } = useSettings();
   return (
     <>
@@ -178,6 +182,25 @@ function TerminalSection() {
         <Switch
           checked={dangerouslySkipPermissions}
           onCheckedChange={setDangerouslySkipPermissions}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Let Claude use the browser (@browser)"
+        description="Launch Claude tabs connected to an in-app MCP server so Claude can list, read, navigate, click, and screenshot this project's embedded browser tabs. The endpoint is bound to localhost and gated by a per-install secret; browser tools are auto-allowed per project."
+      >
+        <Switch
+          checked={browserMcpEnabled}
+          onCheckedChange={setBrowserMcpEnabled}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Allow Claude to run JavaScript in pages (eval_js)"
+        description="Additionally expose an eval_js tool that runs arbitrary JavaScript in a page. Powerful and risky — it can read cookies, tokens, and anything a logged-in page can see. Requires the @browser setting above."
+      >
+        <Switch
+          checked={browserMcpEvalJs}
+          onCheckedChange={setBrowserMcpEvalJs}
+          disabled={!browserMcpEnabled}
         />
       </SettingRow>
     </>

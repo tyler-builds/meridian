@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { MainTab, ProjectTab } from "@/types";
 import {
+  claudeBrowserMcpConfig,
   findProjectFavicon,
   frontendLog,
   onProjectTreeChange,
@@ -9,7 +10,9 @@ import {
   readProjectTree,
   unwatchProjectTree,
   watchProjectTree,
+  type PickedElement,
 } from "@/lib/tauri";
+import { bracketedPaste, injectIntoTerminal } from "@/lib/terminalRegistry";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { loadSession, saveSession } from "@/lib/session";
 import { setObstruction } from "@/lib/nativeSurface";
@@ -43,8 +46,13 @@ const SIDEBAR_MAX = 560;
 const SIDEBAR_DEFAULT = 264;
 
 export default function App() {
-  const { dangerouslySkipPermissions } = useSettings();
+  const { dangerouslySkipPermissions, browserMcpEnabled, browserMcpEvalJs } =
+    useSettings();
   const [tabs, setTabs] = useState<ProjectTab[]>([]);
+  // Live mirror of `tabs` so callbacks can read the current project list without
+  // taking `tabs` as a dependency (which would re-create them on every change).
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [finderOpen, setFinderOpen] = useState(false);
@@ -196,11 +204,40 @@ export default function App() {
   );
 
   const newClaude = useCallback(
-    (projectId: string) => {
+    async (projectId: string) => {
       const paneId = newPaneId();
-      const command = dangerouslySkipPermissions
+      let command = dangerouslySkipPermissions
         ? "claude --dangerously-skip-permissions"
         : "claude";
+
+      // Wire up `@browser`: generate a project-scoped MCP config and launch
+      // `claude` pointed at it, auto-allowing the browser tools. Best-effort —
+      // if the MCP server isn't running, fall back to launching plain `claude`.
+      const root = tabsRef.current.find((t) => t.id === projectId)?.path;
+      if (browserMcpEnabled && root) {
+        try {
+          const configPath = await claudeBrowserMcpConfig(root, browserMcpEvalJs);
+          const tools = [
+            "mcp__browser__list_tabs",
+            "mcp__browser__read_tab",
+            "mcp__browser__navigate",
+            "mcp__browser__reload",
+            "mcp__browser__back",
+            "mcp__browser__forward",
+            "mcp__browser__click",
+            "mcp__browser__wait_for_load",
+            "mcp__browser__screenshot_tab",
+            ...(browserMcpEvalJs ? ["mcp__browser__eval_js"] : []),
+          ];
+          command += ` --mcp-config "${configPath}" --allowedTools ${tools.join(" ")}`;
+        } catch (e) {
+          void frontendLog(
+            "warn",
+            `@browser: MCP config generation failed, launching plain claude: ${String(e)}`,
+          );
+        }
+      }
+
       const newTab: MainTab = {
         id: crypto.randomUUID(),
         kind: "terminal",
@@ -215,7 +252,70 @@ export default function App() {
         activeMainTabId: newTab.id,
       }));
     },
-    [updateProject, dangerouslySkipPermissions],
+    [updateProject, dangerouslySkipPermissions, browserMcpEnabled, browserMcpEvalJs],
+  );
+
+  // An element picked in a browser tab's selector mode → paste it as context
+  // into the project's Claude terminal (no submit; the user adds their prompt).
+  // Returns whether it was delivered, so the browser can confirm with an in-page
+  // toast and the user can keep picking without leaving the page.
+  const pickElement = useCallback(
+    (projectId: string, element: PickedElement): boolean => {
+      const project = tabsRef.current.find((t) => t.id === projectId);
+      if (!project) return false;
+
+      const isClaudeCmd = (c: string) =>
+        c === "claude" || c.startsWith("claude ");
+      // A terminal tab whose initial command launched Claude. Prefer the active
+      // tab when it qualifies, else the most recently opened Claude tab.
+      const claudeTabs = project.mainTabs.filter(
+        (m) =>
+          m.kind === "terminal" &&
+          !!m.initialCommands &&
+          Object.values(m.initialCommands).some(isClaudeCmd),
+      );
+      const chosen =
+        claudeTabs.find((m) => m.id === project.activeMainTabId) ??
+        claudeTabs[claudeTabs.length - 1];
+      const cmds = chosen?.initialCommands;
+      const paneId = cmds && Object.keys(cmds).find((p) => isClaudeCmd(cmds[p]));
+      if (!chosen || !paneId) {
+        void frontendLog(
+          "warn",
+          "Element picker: no Claude tab open in this project to receive the element.",
+        );
+        return false;
+      }
+
+      const attrs = Object.entries(element.attributes)
+        .filter(([k]) => k !== "class" && k !== "id")
+        .map(([k, v]) => `${k}="${v}"`)
+        .join(" ");
+      const block = [
+        `Selected element from ${element.title || element.url}:`,
+        `URL: ${element.url}`,
+        `Selector: ${element.selector}`,
+        attrs ? `Attributes: ${attrs}` : "",
+        element.text ? `Text: ${element.text}` : "",
+        "HTML:",
+        element.html,
+        "",
+      ]
+        .filter((l) => l !== "")
+        .join("\n");
+
+      // Don't switch tabs — the user stays on the page (often picking several
+      // elements); the browser confirms with an in-page toast instead.
+      if (injectIntoTerminal(paneId, bracketedPaste(block))) {
+        return true;
+      }
+      void frontendLog(
+        "warn",
+        "Element picker: the Claude terminal isn't ready to receive the element.",
+      );
+      return false;
+    },
+    [],
   );
 
   const newGit = useCallback(
@@ -812,6 +912,7 @@ export default function App() {
                   onBrowserUrlChange={setBrowserUrl}
                   onBrowserTitleChange={setBrowserTitle}
                   onOpenBrowserUrl={openBrowserUrl}
+                  onPickElement={pickElement}
                   onSplitPane={splitPane}
                   onClosePane={closePane}
                   onFocusPane={focusPane}

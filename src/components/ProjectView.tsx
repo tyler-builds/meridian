@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 
 import type { ProjectTab } from "@/types";
+import type { PickedElement } from "@/lib/tauri";
 import { useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 import { FileTreePanel } from "@/components/FileTreePanel";
@@ -46,6 +47,7 @@ export function ProjectView({
   onBrowserUrlChange,
   onBrowserTitleChange,
   onOpenBrowserUrl,
+  onPickElement,
   onSplitPane,
   onClosePane,
   onFocusPane,
@@ -76,6 +78,7 @@ export function ProjectView({
     title: string,
   ) => void;
   onOpenBrowserUrl: (projectId: string, url: string) => void;
+  onPickElement: (projectId: string, element: PickedElement) => boolean;
   onSplitPane: (
     projectId: string,
     mainTabId: string,
@@ -322,6 +325,7 @@ export function ProjectView({
                     <BrowserPanel
                       id={t.id}
                       initialUrl={t.url ?? "about:blank"}
+                      projectRoot={tab.path}
                       active={active && tab.activeMainTabId === t.id}
                       onUrlChange={(url) =>
                         onBrowserUrlChange(tab.id, t.id, url)
@@ -330,6 +334,9 @@ export function ProjectView({
                         onBrowserTitleChange(tab.id, t.id, title)
                       }
                       onOpenUrl={(url) => onOpenBrowserUrl(tab.id, url)}
+                      onPickElement={(element) =>
+                        onPickElement(tab.id, element)
+                      }
                     />
                   </div>
                 ))}

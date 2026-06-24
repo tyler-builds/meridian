@@ -543,12 +543,35 @@ export interface BrowserNavState {
 export function browserCreate(
   id: string,
   url: string,
+  projectRoot: string,
   x: number,
   y: number,
   width: number,
   height: number,
 ): Promise<void> {
-  return invoke("browser_create", { id, url, x, y, width, height });
+  return invoke("browser_create", { id, url, projectRoot, x, y, width, height });
+}
+
+/**
+ * Mark a browser tab as the visible/active surface (or not) so the MCP server's
+ * browser tools default to the tab the user is looking at.
+ */
+export function browserSetActive(id: string, active: boolean): Promise<void> {
+  return invoke("browser_set_active", { id, active });
+}
+
+/**
+ * Write (or rewrite) the MCP config the in-app `claude` uses to reach Meridian's
+ * browser server for `projectRoot`, and resolve with its absolute path. Pass it
+ * to `claude --mcp-config <path>`. Rejects if the MCP server isn't running (the
+ * caller should fall back to launching plain `claude`). `evalJs` registers the
+ * powerful `eval_js` tool for this session.
+ */
+export function claudeBrowserMcpConfig(
+  projectRoot: string,
+  evalJs: boolean,
+): Promise<string> {
+  return invoke<string>("claude_browser_mcp_config", { projectRoot, evalJs });
 }
 
 export function browserNavigate(id: string, url: string): Promise<void> {
@@ -591,6 +614,68 @@ export function browserClose(id: string): Promise<void> {
 
 export function browserGetUrl(id: string): Promise<string> {
   return invoke<string>("browser_get_url", { id });
+}
+
+/**
+ * Enter element-selector mode in a browser tab: hovering outlines elements and a
+ * left click captures one, delivered via `onBrowserPick`. Escape cancels.
+ */
+export function browserPickStart(id: string): Promise<void> {
+  return invoke("browser_pick_start", { id });
+}
+
+/** Leave element-selector mode (toolbar toggle off / tab switch). */
+export function browserPickStop(id: string): Promise<void> {
+  return invoke("browser_pick_stop", { id });
+}
+
+/**
+ * Show a brief, auto-dismissing toast inside a browser tab's page. Rendered in
+ * the page (not the DOM) because the browser is a native surface over the DOM.
+ */
+export function browserPickToast(id: string, message: string): Promise<void> {
+  return invoke("browser_pick_toast", { id, message });
+}
+
+/** A page element captured in selector mode. */
+export interface PickedElement {
+  /** A CSS selector path to the element (best-effort, id-anchored when possible). */
+  selector: string;
+  tag: string;
+  id: string | null;
+  classes: string;
+  attributes: Record<string, string>;
+  /** Visible text, truncated. */
+  text: string;
+  /** outerHTML, truncated. */
+  html: string;
+  rect: { x: number; y: number; w: number; h: number };
+  url: string;
+  title: string;
+}
+
+/**
+ * Fired when the user picks an element (or cancels) in a tab's selector mode.
+ * On a pick the payload carries the element; on cancel/Escape it's `null`.
+ */
+export function onBrowserPick(
+  id: string,
+  cb: (element: PickedElement | null) => void,
+): Promise<UnlistenFn> {
+  return listen<{ cancel: boolean; data?: string }>(
+    `browser://pick/${id}`,
+    (e) => {
+      if (e.payload.cancel || !e.payload.data) {
+        cb(null);
+        return;
+      }
+      try {
+        cb(JSON.parse(e.payload.data) as PickedElement);
+      } catch {
+        cb(null);
+      }
+    },
+  );
 }
 
 export function onBrowserNavState(

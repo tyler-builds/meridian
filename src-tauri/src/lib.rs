@@ -14,6 +14,7 @@ use tauri::{
 };
 
 mod jira;
+mod mcp;
 #[cfg(windows)]
 mod webview_procs;
 
@@ -1653,12 +1654,62 @@ struct BrowserSession {
     history: Vec<String>,
     index: usize,
     pending: NavIntent,
+    /// Last document title seen (mirrors what's emitted to the frontend). Used
+    /// by the MCP server's `list_tabs` so the in-app Claude sees tab names.
+    title: String,
+    /// Absolute root of the project this tab belongs to. The MCP server scopes a
+    /// Claude session to only the tabs of its own project.
+    project_root: String,
+    /// Whether this is the visible/active surface (set by the frontend). Lets
+    /// `read_tab`/`screenshot` default to the tab the user is looking at.
+    active: bool,
 }
 
 /// Holds every live browser webview keyed by a frontend-supplied id.
 #[derive(Default)]
-struct BrowserManager {
+pub(crate) struct BrowserManager {
     sessions: Mutex<HashMap<String, BrowserSession>>,
+}
+
+/// A browser tab as the MCP server reports it (`list_tabs`, resource listing).
+pub(crate) struct TabSnapshot {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub active: bool,
+}
+
+/// Snapshot the open browser tabs belonging to `root` (most-specific-root match
+/// would over-reach here — tabs store their exact owning root, so compare it
+/// directly). Returned in id order is not guaranteed; the caller sorts if needed.
+pub(crate) fn browser_tabs_for_root(app: &AppHandle, root: &str) -> Vec<TabSnapshot> {
+    let Some(state) = app.try_state::<BrowserManager>() else {
+        return Vec::new();
+    };
+    let sessions = state.sessions.lock().unwrap();
+    sessions
+        .iter()
+        .filter(|(_, s)| norm_path(&s.project_root) == norm_path(root))
+        .map(|(id, s)| TabSnapshot {
+            id: id.clone(),
+            title: s.title.clone(),
+            url: s.history.get(s.index).cloned().unwrap_or_default(),
+            active: s.active,
+        })
+        .collect()
+}
+
+/// True when `id` is a browser tab owned by `root` — the MCP server's guard so a
+/// Claude session can't drive another project's tabs by guessing an id.
+pub(crate) fn browser_tab_in_root(app: &AppHandle, id: &str, root: &str) -> bool {
+    app.try_state::<BrowserManager>()
+        .and_then(|state| {
+            let sessions = state.sessions.lock().unwrap();
+            sessions
+                .get(id)
+                .map(|s| norm_path(&s.project_root) == norm_path(root))
+        })
+        .unwrap_or(false)
 }
 
 /// Navigation state pushed to the frontend so the toolbar can render the
@@ -1717,12 +1768,123 @@ const BROWSER_INIT_SCRIPT: &str = r#"
 })();
 "#;
 
+/// Injected on demand to enter "element selector" mode: hovering outlines the
+/// element under the cursor, a left click captures a descriptor of it and sends
+/// it to the host through the same sentinel-navigation channel `window.open`
+/// uses (so the IPC-less page still has no access to Meridian's commands), and
+/// Escape cancels. `window.__meridianPickerStop` tears it down (the toolbar
+/// toggle calls it). Re-entrant-safe.
+const PICKER_SCRIPT: &str = r##"
+(function () {
+  if (window.__meridianPicker) return;
+  window.__meridianPicker = true;
+  var PICK = "https://meridian.invalid/pick?data=";
+  var CANCEL = "https://meridian.invalid/pick?cancel=1";
+  var overlay = document.createElement("div");
+  overlay.style.cssText =
+    "position:fixed;z-index:2147483647;pointer-events:none;border:2px solid #4f9cff;" +
+    "background:rgba(79,156,255,0.14);box-shadow:0 0 0 1px rgba(0,0,0,0.35);" +
+    "border-radius:2px;top:0;left:0;width:0;height:0;transition:all 40ms ease;";
+  var label = document.createElement("div");
+  label.style.cssText =
+    "position:fixed;z-index:2147483647;pointer-events:none;font:12px/1.5 ui-monospace," +
+    "SFMono-Regular,Menlo,monospace;background:#10141a;color:#e6edf3;padding:2px 6px;" +
+    "border-radius:4px;max-width:80vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+  document.documentElement.appendChild(overlay);
+  document.documentElement.appendChild(label);
+  var current = null;
+
+  function describe(el) {
+    var s = el.tagName.toLowerCase();
+    if (el.id) s += "#" + el.id;
+    if (el.classList && el.classList.length) s += "." + Array.prototype.join.call(el.classList, ".");
+    return s;
+  }
+  function cssPath(el) {
+    if (el.id) return "#" + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id);
+    var parts = [];
+    while (el && el.nodeType === 1 && parts.length < 6) {
+      var seg = el.tagName.toLowerCase();
+      if (el.id) { parts.unshift("#" + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id)); break; }
+      var p = el.parentElement;
+      if (p) {
+        var same = Array.prototype.filter.call(p.children, function (c) { return c.tagName === el.tagName; });
+        if (same.length > 1) seg += ":nth-of-type(" + (Array.prototype.indexOf.call(same, el) + 1) + ")";
+      }
+      parts.unshift(seg);
+      el = p;
+    }
+    return parts.join(" > ");
+  }
+  function onMove(e) {
+    var el = e.target;
+    if (!el || el === overlay || el === label) return;
+    current = el;
+    var r = el.getBoundingClientRect();
+    overlay.style.top = r.top + "px";
+    overlay.style.left = r.left + "px";
+    overlay.style.width = r.width + "px";
+    overlay.style.height = r.height + "px";
+    label.textContent = describe(el);
+    var ly = r.top - 22;
+    label.style.top = (ly < 0 ? r.top + 4 : ly) + "px";
+    label.style.left = Math.max(0, r.left) + "px";
+  }
+  function teardown() {
+    document.removeEventListener("mousemove", onMove, true);
+    document.removeEventListener("click", onClick, true);
+    document.removeEventListener("keydown", onKey, true);
+    document.removeEventListener("contextmenu", onCtx, true);
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    if (label.parentNode) label.parentNode.removeChild(label);
+    window.__meridianPicker = null;
+    window.__meridianPickerStop = null;
+  }
+  function onClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var el = current || e.target;
+    var r = el.getBoundingClientRect();
+    var attrs = {};
+    for (var i = 0; i < el.attributes.length; i++) attrs[el.attributes[i].name] = el.attributes[i].value;
+    var html = el.outerHTML || "";
+    if (html.length > 4000) html = html.slice(0, 4000) + "…";
+    var text = (el.innerText || el.textContent || "").trim();
+    if (text.length > 1500) text = text.slice(0, 1500) + "…";
+    var payload = {
+      selector: cssPath(el),
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      classes: el.classList ? Array.prototype.join.call(el.classList, " ") : "",
+      attributes: attrs,
+      text: text,
+      html: html,
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+      url: location.href,
+      title: document.title
+    };
+    // Stay in selector mode so the user can pick several elements in a row;
+    // Escape or the toolbar toggle tears it down. The host shows a confirmation
+    // toast in the page (see browser_pick_toast).
+    try { location.href = PICK + encodeURIComponent(JSON.stringify(payload)); } catch (err) {}
+  }
+  function onKey(e) { if (e.key === "Escape") { teardown(); try { location.href = CANCEL; } catch (err) {} } }
+  function onCtx(e) { e.preventDefault(); }
+  document.addEventListener("mousemove", onMove, true);
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("keydown", onKey, true);
+  document.addEventListener("contextmenu", onCtx, true);
+  window.__meridianPickerStop = teardown;
+})();
+"##;
+
 #[tauri::command]
 async fn browser_create(
     app: AppHandle,
     state: State<'_, BrowserManager>,
     id: String,
     url: String,
+    project_root: String,
     x: f64,
     y: f64,
     width: f64,
@@ -1743,24 +1905,48 @@ async fn browser_create(
             history: vec![url.clone()],
             index: 0,
             pending: NavIntent::None,
+            title: String::new(),
+            project_root,
+            active: false,
         },
     );
 
     let nav_event = format!("browser://navstate/{id}");
     let title_event = format!("browser://title/{id}");
     let newtab_event = format!("browser://newtab/{id}");
+    let pick_event = format!("browser://pick/{id}");
     let nav_app = app.clone();
     let nav_id = id.clone();
+    let title_id = id.clone();
 
     let builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(parsed))
         .initialization_script(BROWSER_INIT_SCRIPT)
         .on_navigation(move |url| {
-            // The injected script funnels window.open / target=_blank through
-            // this sentinel host; turn it into a new in-app tab and cancel the
-            // navigation so the current page stays put.
+            // The injected scripts funnel host requests through this sentinel
+            // host (the page keeps no IPC access); branch on the path and cancel
+            // the navigation so the current page stays put.
             if url.host_str() == Some(NEWTAB_HOST) {
-                if let Some((_, target)) = url.query_pairs().find(|(k, _)| k == "url") {
-                    let _ = nav_app.emit(&newtab_event, target.into_owned());
+                match url.path() {
+                    // Element picker: a captured element (or a cancel) from
+                    // selector mode (see PICKER_SCRIPT).
+                    "/pick" => {
+                        if url.query_pairs().any(|(k, _)| k == "cancel") {
+                            let _ = nav_app.emit(&pick_event, serde_json::json!({ "cancel": true }));
+                        } else if let Some((_, data)) =
+                            url.query_pairs().find(|(k, _)| k == "data")
+                        {
+                            let _ = nav_app.emit(
+                                &pick_event,
+                                serde_json::json!({ "cancel": false, "data": data.into_owned() }),
+                            );
+                        }
+                    }
+                    // window.open / target=_blank / middle-click → new in-app tab.
+                    _ => {
+                        if let Some((_, target)) = url.query_pairs().find(|(k, _)| k == "url") {
+                            let _ = nav_app.emit(&newtab_event, target.into_owned());
+                        }
+                    }
                 }
                 return false;
             }
@@ -1802,6 +1988,13 @@ async fn browser_create(
             true
         })
         .on_document_title_changed(move |_webview, title| {
+            // Mirror the title into the session so the MCP `list_tabs` tool can
+            // name tabs, then notify the frontend toolbar as before.
+            if let Some(state) = app.try_state::<BrowserManager>() {
+                if let Some(s) = state.sessions.lock().unwrap().get_mut(&title_id) {
+                    s.title = title.clone();
+                }
+            }
             let _ = app.emit(&title_event, title);
         });
 
@@ -1923,6 +2116,61 @@ async fn browser_close(
     Ok(())
 }
 
+/// Enter element-selector mode in a tab: inject the picker overlay script. The
+/// captured element (on click) arrives back on `browser://pick/{id}`.
+#[tauri::command]
+async fn browser_pick_start(app: AppHandle, id: String) -> Result<(), String> {
+    browser_webview(&app, &id)?
+        .eval(PICKER_SCRIPT)
+        .map_err(|e| e.to_string())
+}
+
+/// Leave element-selector mode (the toolbar toggle, or a tab switch): tear down
+/// the injected overlay if it's still present.
+#[tauri::command]
+async fn browser_pick_stop(app: AppHandle, id: String) -> Result<(), String> {
+    browser_webview(&app, &id)?
+        .eval("window.__meridianPickerStop && window.__meridianPickerStop()")
+        .map_err(|e| e.to_string())
+}
+
+// Self-contained in-page toast (split around the JSON-encoded message). Rendered
+// inside the page rather than in the DOM because the browser is a native surface
+// layered over the DOM — a React toast would sit behind it. Auto-dismisses.
+const TOAST_PRE: &str = "(function(){var m=";
+const TOAST_POST: &str = ";var id='__meridianToast';var old=document.getElementById(id);if(old)old.remove();var t=document.createElement('div');t.id=id;t.textContent=m;t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;background:#10141a;color:#e6edf3;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;padding:8px 14px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.4);pointer-events:none;opacity:0;transition:opacity 120ms ease;';document.documentElement.appendChild(t);requestAnimationFrame(function(){t.style.opacity=\"1\";});setTimeout(function(){t.style.opacity=\"0\";},1400);setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t);},1700);})();";
+
+/// Show a brief, auto-dismissing toast inside a browser tab's page. Used to
+/// confirm an element was added to the Claude prompt without switching tabs.
+#[tauri::command]
+async fn browser_pick_toast(app: AppHandle, id: String, message: String) -> Result<(), String> {
+    let msg = serde_json::to_string(&message).unwrap_or_else(|_| "\"\"".to_string());
+    let script = format!("{TOAST_PRE}{msg}{TOAST_POST}");
+    browser_webview(&app, &id)?
+        .eval(&script)
+        .map_err(|e| e.to_string())
+}
+
+/// Mark a browser tab as the visible/active surface (or not). The frontend calls
+/// this from its show/hide effect so the MCP server can default `read_tab` and
+/// `screenshot` to the tab the user is actually looking at.
+#[tauri::command]
+fn browser_set_active(state: State<BrowserManager>, id: String, active: bool) {
+    let mut sessions = state.sessions.lock().unwrap();
+    if active {
+        // Exactly one active tab per project root at a time.
+        if let Some(root) = sessions.get(&id).map(|s| s.project_root.clone()) {
+            for (sid, s) in sessions.iter_mut() {
+                if norm_path(&s.project_root) == norm_path(&root) {
+                    s.active = sid == &id;
+                }
+            }
+        }
+    } else if let Some(s) = sessions.get_mut(&id) {
+        s.active = false;
+    }
+}
+
 #[tauri::command]
 async fn browser_get_url(
     app: AppHandle,
@@ -1991,6 +2239,288 @@ fn read_live_url(webview: &tauri::Webview) -> Option<String> {
         .ok()
         .map(|u| u.to_string())
         .filter(|s| !s.is_empty())
+}
+
+// --- MCP browser bridge ---
+//
+// Helpers the in-process MCP server (mcp.rs) uses to drive and read the embedded
+// browser tabs on behalf of the in-app Claude. Navigation/back/forward/reload
+// reuse the same logic the user-facing commands do (so history stays correct);
+// reading content and capturing a screenshot need a value back from the page,
+// which `eval()` can't give — so they go through platform "evaluate-with-result"
+// APIs, mirroring the `read_live_url` precedent.
+
+/// Resolve a browser tab id to its webview, erroring if it's gone.
+pub(crate) fn browser_webview(
+    app: &AppHandle,
+    id: &str,
+) -> Result<tauri::Webview, String> {
+    app.get_webview(&browser_label(id))
+        .ok_or_else(|| format!("browser tab '{id}' not found"))
+}
+
+/// Navigate a tab to `url` (records history via the on_navigation delegate).
+pub(crate) fn browser_do_navigate(app: &AppHandle, id: &str, url: &str) -> Result<(), String> {
+    let parsed: Url = url.parse().map_err(|e| format!("invalid url: {e}"))?;
+    browser_webview(app, id)?
+        .navigate(parsed)
+        .map_err(|e| e.to_string())
+}
+
+/// Reload a tab.
+pub(crate) fn browser_do_reload(app: &AppHandle, id: &str) -> Result<(), String> {
+    browser_webview(app, id)?.reload().map_err(|e| e.to_string())
+}
+
+/// Step a tab back/forward in its history. `forward` selects the direction.
+/// Sets the pending intent (so the resulting on_navigation updates the index
+/// correctly) exactly like the user-facing back/forward commands.
+pub(crate) fn browser_do_history(app: &AppHandle, id: &str, forward: bool) -> Result<(), String> {
+    if let Some(state) = app.try_state::<BrowserManager>() {
+        let mut sessions = state.sessions.lock().unwrap();
+        match sessions.get_mut(id) {
+            Some(s) if forward && s.index + 1 < s.history.len() => s.pending = NavIntent::Forward,
+            Some(s) if !forward && s.index > 0 => s.pending = NavIntent::Back,
+            Some(_) => return Ok(()), // already at an end — no-op
+            None => return Err(format!("browser tab '{id}' not found")),
+        }
+    }
+    let script = if forward { "history.forward()" } else { "history.back()" };
+    browser_webview(app, id)?.eval(script).map_err(|e| e.to_string())
+}
+
+/// Evaluate `script` in a tab's top frame and return the result as a JSON string
+/// (exactly what the platform's evaluate-with-result API yields). Blocks up to
+/// `timeout_ms` for the page to answer. The script should evaluate to a
+/// JSON-serializable value; non-serializable results come back as `"null"`.
+///
+/// Windows (WebView2) is implemented; macOS/Linux return a clear error pending a
+/// tested WKWebView/WebKitGTK implementation (matching the README's platform
+/// posture — navigation and tab listing still work everywhere; only content
+/// reading, screenshots, and eval_js are gated to Windows for now).
+#[cfg(windows)]
+pub(crate) fn browser_eval_with_result(
+    app: &AppHandle,
+    id: &str,
+    script: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    use webview2_com::ExecuteScriptCompletedHandler;
+    use windows_core::HSTRING;
+
+    let webview = browser_webview(app, id)?;
+    let script = HSTRING::from(script);
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+
+    webview
+        .with_webview(move |platform| unsafe {
+            let controller = platform.controller();
+            let core = match controller.CoreWebView2() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+            let tx_handler = tx.clone();
+            let handler = ExecuteScriptCompletedHandler::create(Box::new(
+                move |result: windows_core::Result<()>, json: String| -> windows_core::Result<()> {
+                    let _ = match result {
+                        Ok(()) => tx_handler.send(Ok(json)),
+                        Err(e) => tx_handler.send(Err(e.to_string())),
+                    };
+                    Ok(())
+                },
+            ));
+            if let Err(e) = core.ExecuteScript(&script, &handler) {
+                let _ = tx.send(Err(e.to_string()));
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.recv_timeout(std::time::Duration::from_millis(timeout_ms))
+        .map_err(|_| "page did not respond (eval timed out)".to_string())?
+}
+
+#[cfg(not(windows))]
+pub(crate) fn browser_eval_with_result(
+    _app: &AppHandle,
+    _id: &str,
+    _script: &str,
+    _timeout_ms: u64,
+) -> Result<String, String> {
+    // TODO(macos): WKWebView `evaluateJavaScript:completionHandler:` via objc2 +
+    // block2, wrapping the script so it returns a JSON string (the completion
+    // handler yields a native object, unlike WebView2's JSON string).
+    // TODO(linux): WebKitGTK `webkit_web_view_evaluate_javascript` (async, with a
+    // GAsyncReadyCallback) + `webkit_javascript_result_get_js_value`.
+    Err("reading browser page content is currently only implemented on Windows".to_string())
+}
+
+/// Capture a PNG screenshot of a tab's current viewport. Windows uses WebView2's
+/// `CapturePreview` into an in-memory stream; other platforms return a clear
+/// error for now (see `browser_eval_with_result`).
+#[cfg(windows)]
+pub(crate) fn browser_screenshot_png(
+    app: &AppHandle,
+    id: &str,
+    timeout_ms: u64,
+) -> Result<Vec<u8>, String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+    use webview2_com::CapturePreviewCompletedHandler;
+    use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+    use windows::Win32::System::Com::{IStream, STREAM_SEEK_END, STREAM_SEEK_SET};
+    use windows::Win32::Foundation::HGLOBAL;
+
+    let webview = browser_webview(app, id)?;
+    // The IStream is COM (`!Send`), so we can't carry it back across the channel.
+    // Instead the capture, and the read-out of the resulting bytes, both happen on
+    // the UI thread inside the completion handler; only the finished `Vec<u8>`
+    // (which is `Send`) crosses back to this thread.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+
+    /// Read an entire IStream into a Vec: seek to the end to learn the size, then
+    /// to the start and read it in one pass.
+    unsafe fn read_stream(stream: &IStream) -> Result<Vec<u8>, String> {
+        let mut end: u64 = 0;
+        stream
+            .Seek(0, STREAM_SEEK_END, Some(&mut end))
+            .map_err(|e| e.to_string())?;
+        stream
+            .Seek(0, STREAM_SEEK_SET, None)
+            .map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; end as usize];
+        let mut off = 0usize;
+        while off < buf.len() {
+            let want = (buf.len() - off).min(u32::MAX as usize) as u32;
+            let mut read: u32 = 0;
+            // `Read` returns an HRESULT (S_FALSE at EOF is valid), so `.ok()`.
+            stream
+                .Read(buf[off..].as_mut_ptr() as *mut _, want, Some(&mut read))
+                .ok()
+                .map_err(|e| e.to_string())?;
+            if read == 0 {
+                break;
+            }
+            off += read as usize;
+        }
+        buf.truncate(off);
+        Ok(buf)
+    }
+
+    webview
+        .with_webview(move |platform| unsafe {
+            let controller = platform.controller();
+            let core = match controller.CoreWebView2() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+            // An auto-growing HGLOBAL-backed stream the PNG is written into.
+            let stream = match CreateStreamOnHGlobal(HGLOBAL::default(), true) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(Err(e.to_string()));
+                    return;
+                }
+            };
+            let stream_for_handler = stream.clone();
+            let tx_handler = tx.clone();
+            let handler = CapturePreviewCompletedHandler::create(Box::new(
+                move |result: windows_core::Result<()>| -> windows_core::Result<()> {
+                    let _ = match result {
+                        Ok(()) => tx_handler.send(read_stream(&stream_for_handler)),
+                        Err(e) => tx_handler.send(Err(e.to_string())),
+                    };
+                    Ok(())
+                },
+            ));
+            if let Err(e) =
+                core.CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, &stream, &handler)
+            {
+                let _ = tx.send(Err(e.to_string()));
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    rx.recv_timeout(std::time::Duration::from_millis(timeout_ms))
+        .map_err(|_| "screenshot timed out".to_string())?
+}
+
+#[cfg(not(windows))]
+pub(crate) fn browser_screenshot_png(
+    _app: &AppHandle,
+    _id: &str,
+    _timeout_ms: u64,
+) -> Result<Vec<u8>, String> {
+    // TODO(macos): WKWebView `takeSnapshotWithConfiguration:completionHandler:`
+    // → NSImage → PNG bytes. TODO(linux): WebKitGTK `webkit_web_view_snapshot`.
+    Err("browser screenshots are currently only implemented on Windows".to_string())
+}
+
+/// Percent-encode a string for use as a URL query value (the project root, which
+/// contains drive letters, backslashes, colons, and spaces on Windows).
+fn url_query_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Write (or rewrite) the MCP config the in-app `claude` uses to reach the
+/// browser server for `project_root`, and return its absolute path. The file is
+/// stable per project (named by a hash of the root) so a Claude tab restored from
+/// saved state — which re-runs its persisted `claude --mcp-config <file>` launch
+/// command — keeps pointing at a valid config. The endpoint's port and secret are
+/// themselves persisted (see mcp.rs), so the file stays valid across restarts.
+#[tauri::command]
+fn claude_browser_mcp_config(
+    app: AppHandle,
+    mcp: State<mcp::McpState>,
+    project_root: String,
+    eval_js: bool,
+) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("mcp");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    norm_path(&project_root).hash(&mut hasher);
+    let file = dir.join(format!("browser-{:016x}.json", hasher.finish()));
+
+    // The root + eval flag ride in the endpoint URL's query so the server scopes
+    // this session to this project's tabs; the secret gates access (browser tools
+    // are auto-allowed, so the secret is the real boundary).
+    let url = format!(
+        "http://127.0.0.1:{}/mcp?root={}&eval={}",
+        mcp.port,
+        url_query_encode(&project_root),
+        if eval_js { "1" } else { "0" }
+    );
+    let config = serde_json::json!({
+        "mcpServers": {
+            "browser": {
+                "type": "http",
+                "url": url,
+                "headers": { "Authorization": format!("Bearer {}", mcp.secret) }
+            }
+        }
+    });
+    std::fs::write(&file, config.to_string()).map_err(|e| e.to_string())?;
+    Ok(denormalize(&file))
 }
 
 /// One rate-limit window's state as reported by the Claude usage endpoint.
@@ -2700,6 +3230,11 @@ pub fn run() {
             browser_hide,
             browser_close,
             browser_get_url,
+            browser_set_active,
+            browser_pick_start,
+            browser_pick_stop,
+            browser_pick_toast,
+            claude_browser_mcp_config,
             claude_usage,
             resource_stats,
             frontend_log,
@@ -2740,6 +3275,16 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION"),
                 cfg!(debug_assertions)
             );
+            // Start the in-process MCP server backing the `@browser` feature. If
+            // it can't bind a port, the feature stays off: McpState is left
+            // unmanaged, so `claude_browser_mcp_config` errors and the frontend
+            // falls back to launching plain `claude`.
+            match mcp::start(app.handle().clone()) {
+                Some(state) => {
+                    app.manage(state);
+                }
+                None => log::warn!("MCP browser server failed to start; @browser disabled"),
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
