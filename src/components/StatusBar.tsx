@@ -225,25 +225,19 @@ function useClaudeUsage(enabled: boolean): ClaudeUsage | null {
     if (!enabled) return;
     let active = true;
     // The backend collapses every failure mode — network blip, rate-limit, and
-    // the brief window where `claude` rewrites ~/.claude/.credentials.json on a
-    // token refresh — into `available:false`. Blanking on a single such result
-    // makes the bar flicker away mid-session, so tolerate a few consecutive
-    // misses (keeping the last good value) before hiding. Sustained
-    // unavailability (a real sign-out) still clears it after the threshold.
-    let misses = 0;
+    // an on-disk access token that expired between CLI runs (Meridian reads
+    // Claude Code's token passively and never refreshes it) — into
+    // `available:false`. None of those mean usage stopped mattering, so keep
+    // showing the last good value rather than hiding the bars; they update
+    // again as soon as a fetch succeeds. The bars only ever disappear if no
+    // fetch has succeeded since launch (e.g. genuinely signed out).
     const refresh = () => {
       claudeUsage()
         .then((u) => {
-          if (!active) return;
-          if (u.available) {
-            misses = 0;
-            setUsage(u);
-          } else if (++misses >= 3) {
-            setUsage(null);
-          }
+          if (active && u.available) setUsage(u);
         })
         .catch(() => {
-          if (active && ++misses >= 3) setUsage(null);
+          /* transient failure; keep the last good value */
         });
     };
     refresh();

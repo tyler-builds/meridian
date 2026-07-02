@@ -2802,6 +2802,12 @@ fn parse_window(node: Option<&serde_json::Value>) -> UsageWindow {
 /// Read the Claude OAuth access token from `~/.claude/.credentials.json`. On
 /// macOS Claude Code keeps credentials in the Keychain instead, so this may be
 /// absent there; that simply yields no usage (the bars hide).
+///
+/// Deliberately read-only and passive: Meridian never refreshes this token
+/// itself (that would mean impersonating the CLI against an undocumented OAuth
+/// endpoint and racing its token rotation). If the token has expired between
+/// CLI runs, the fetch fails and the frontend keeps showing the last good
+/// value until the CLI refreshes the file.
 fn read_claude_token() -> Option<String> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -2816,7 +2822,7 @@ fn read_claude_token() -> Option<String> {
 
 /// Blocking fetch of the authoritative usage figures. Any failure (no token,
 /// expired token → 401, offline, schema change) returns an unavailable result
-/// rather than erroring, so the status bar just hides the bars.
+/// rather than erroring; the frontend keeps the last good value on screen.
 fn fetch_claude_usage() -> ClaudeUsage {
     let Some(token) = read_claude_token() else {
         return ClaudeUsage::default();
@@ -2828,8 +2834,14 @@ fn fetch_claude_usage() -> ClaudeUsage {
         .set("anthropic-beta", "oauth-2025-04-20")
         .set("anthropic-version", "2023-06-01")
         .call();
-    let Ok(resp) = resp else {
-        return ClaudeUsage::default();
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            // Expired-token 401s land here; log at debug so a sustained outage
+            // is diagnosable without spamming the log every poll.
+            log::debug!("claude usage: request failed: {e}");
+            return ClaudeUsage::default();
+        }
     };
     let Ok(text) = resp.into_string() else {
         return ClaudeUsage::default();
