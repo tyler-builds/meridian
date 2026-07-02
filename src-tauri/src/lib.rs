@@ -15,13 +15,26 @@ use tauri::{
 
 mod jira;
 mod mcp;
+mod watchdog;
 #[cfg(windows)]
 mod webview_procs;
 
+/// Work routed to a PTY session's dedicated writer thread.
+enum PtyMsg {
+    Data(Vec<u8>),
+    Resize(PtySize),
+}
+
 /// A single running pseudo-terminal session.
+///
+/// Input and resizes go through `writer_tx` to a per-session writer thread that
+/// owns the PTY master and writer. Writes into a ConPTY block indefinitely when
+/// the child stops draining stdin (a paste into a busy program), and `pty_write`
+/// is a sync command running on the main thread — writing there froze the whole
+/// UI until the child read the input. The channel is unbounded, so a stalled
+/// child just buffers the user's input in memory instead of the event loop.
 struct PtySession {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer_tx: std::sync::mpsc::Sender<PtyMsg>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// The directory the shell was spawned in (the project root). Used by the
     /// resource monitor to attribute this terminal's CPU/RAM to a project.
@@ -35,9 +48,15 @@ struct PtyManager {
 }
 
 /// One running language-server child process (keyed by project root path).
+///
+/// Outgoing messages go through `writer_tx` to a per-session writer thread that
+/// owns the child's stdin. tsserver can stop reading stdin for long stretches
+/// while it type-checks; once the pipe buffer fills, a write blocks — and
+/// `lsp_send` is a sync command on the main thread, so writing there froze the
+/// UI while the user typed. The writer thread absorbs that instead.
 struct LspSession {
     child: std::process::Child,
-    stdin: std::process::ChildStdin,
+    writer_tx: std::sync::mpsc::Sender<String>,
 }
 
 /// Holds every live language server keyed by project root path.
@@ -229,30 +248,45 @@ async fn watch_project_tree(
 /// Stop watching a project root and release its OS watch.
 #[tauri::command]
 fn unwatch_project_tree(state: State<TreeWatcherManager>, id: String) {
-    state.watchers.lock().unwrap().remove(&id);
+    if let Some(watcher) = state.watchers.lock().unwrap().remove(&id) {
+        // Dropping a Debouncer joins its worker thread, which may be mid
+        // full-disk walk of a large project — drop it off the main thread so
+        // closing a project can't stall the UI for the rest of the walk.
+        thread::spawn(move || drop(watcher));
+    }
 }
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Read a UTF-8 text file (project root + relative path) for the editor.
+/// Async + spawn_blocking: files can be up to 5 MB and live on slow/network
+/// disks — reading on the main thread stalls the UI.
 #[tauri::command]
-fn read_file_text(root: String, rel: String) -> Result<String, String> {
-    let mut path = std::path::PathBuf::from(&root);
-    path.push(&rel);
-    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
-    if meta.len() > MAX_FILE_BYTES {
-        return Err("File is too large to open in the editor".to_string());
-    }
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    String::from_utf8(bytes).map_err(|_| "Binary or non-UTF-8 file".to_string())
+async fn read_file_text(root: String, rel: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut path = std::path::PathBuf::from(&root);
+        path.push(&rel);
+        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        if meta.len() > MAX_FILE_BYTES {
+            return Err("File is too large to open in the editor".to_string());
+        }
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        String::from_utf8(bytes).map_err(|_| "Binary or non-UTF-8 file".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Write text content to a file (project root + relative path).
 #[tauri::command]
-fn write_file_text(root: String, rel: String, content: String) -> Result<(), String> {
-    let mut path = std::path::PathBuf::from(&root);
-    path.push(&rel);
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+async fn write_file_text(root: String, rel: String, content: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut path = std::path::PathBuf::from(&root);
+        path.push(&rel);
+        std::fs::write(&path, content).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // --- Prettier (project-local) ---
@@ -905,43 +939,60 @@ fn git_status_blocking(path: &str) -> Result<GitStatus, String> {
 }
 
 /// Stage the given paths (`git add`). A no-op when the list is empty.
+/// Async + spawn_blocking (like every command that spawns git): a git run on
+/// the main thread stalls the UI for the whole subprocess.
 #[tauri::command]
-fn git_stage(path: String, files: Vec<String>) -> Result<(), String> {
+async fn git_stage(path: String, files: Vec<String>) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
     }
-    let mut args: Vec<&str> = vec!["add", "--"];
-    args.extend(files.iter().map(String::as_str));
-    run_git_checked(&path, &args).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut args: Vec<&str> = vec!["add", "--"];
+        args.extend(files.iter().map(String::as_str));
+        run_git_checked(&path, &args).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Unstage the given paths. Uses `git restore --staged` normally, falling back
 /// to `git rm --cached` in a fresh repo with no commits (where there's no HEAD
 /// for `restore` to resolve against). A no-op when the list is empty.
 #[tauri::command]
-fn git_unstage(path: String, files: Vec<String>) -> Result<(), String> {
+async fn git_unstage(path: String, files: Vec<String>) -> Result<(), String> {
     if files.is_empty() {
         return Ok(());
     }
-    let has_head = run_git(&path, &["rev-parse", "--verify", "HEAD"])
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let mut args: Vec<&str> = if has_head {
-        vec!["restore", "--staged", "--"]
-    } else {
-        vec!["rm", "--cached", "--quiet", "--"]
-    };
-    args.extend(files.iter().map(String::as_str));
-    run_git_checked(&path, &args).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let has_head = run_git(&path, &["rev-parse", "--verify", "HEAD"])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let mut args: Vec<&str> = if has_head {
+            vec!["restore", "--staged", "--"]
+        } else {
+            vec!["rm", "--cached", "--quiet", "--"]
+        };
+        args.extend(files.iter().map(String::as_str));
+        run_git_checked(&path, &args).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Commit the staged changes with `message`. Rejects an empty message.
+/// Async + spawn_blocking: commit hooks (husky/lint-staged) can run for
+/// seconds to minutes — on the main thread that froze the app for the
+/// entire hook run.
 #[tauri::command]
-fn git_commit(path: String, message: String) -> Result<(), String> {
+async fn git_commit(path: String, message: String) -> Result<(), String> {
     if message.trim().is_empty() {
         return Err("Commit message is empty".to_string());
     }
-    run_git_checked(&path, &["commit", "-m", &message]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        run_git_checked(&path, &["commit", "-m", &message]).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Push the current branch. When the branch has no upstream yet, push with
@@ -951,27 +1002,31 @@ fn git_commit(path: String, message: String) -> Result<(), String> {
 /// unauthenticated push from hanging (it errors with the git message instead).
 #[tauri::command]
 async fn git_push(path: String) -> Result<(), String> {
-    let has_upstream = run_git(
-        &path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        let has_upstream = run_git(
+            &path,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
-    if has_upstream {
-        return run_git_checked(&path, &["push"]).map(|_| ());
-    }
+        if has_upstream {
+            return run_git_checked(&path, &["push"]).map(|_| ());
+        }
 
-    let branch = git_str(&path, &["symbolic-ref", "--short", "HEAD"])
-        .ok_or_else(|| "Not on a branch (detached HEAD)".to_string())?;
-    let remotes = git_str(&path, &["remote"]).unwrap_or_default();
-    let remote = remotes
-        .lines()
-        .find(|r| *r == "origin")
-        .or_else(|| remotes.lines().next())
-        .ok_or_else(|| "No git remote configured".to_string())?
-        .to_string();
-    run_git_checked(&path, &["push", "-u", &remote, &branch]).map(|_| ())
+        let branch = git_str(&path, &["symbolic-ref", "--short", "HEAD"])
+            .ok_or_else(|| "Not on a branch (detached HEAD)".to_string())?;
+        let remotes = git_str(&path, &["remote"]).unwrap_or_default();
+        let remote = remotes
+            .lines()
+            .find(|r| *r == "origin")
+            .or_else(|| remotes.lines().next())
+            .ok_or_else(|| "No git remote configured".to_string())?
+            .to_string();
+        run_git_checked(&path, &["push", "-u", &remote, &branch]).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Pull the current branch from its upstream (`git pull --no-edit`, so a merge
@@ -983,16 +1038,20 @@ async fn git_push(path: String) -> Result<(), String> {
 /// working tree, but git's overwrite protection is the real backstop.
 #[tauri::command]
 async fn git_pull(path: String) -> Result<(), String> {
-    let has_upstream = run_git(
-        &path,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-    if !has_upstream {
-        return Err("No upstream branch to pull from".to_string());
-    }
-    run_git_checked(&path, &["pull", "--no-edit"]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let has_upstream = run_git(
+            &path,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+        if !has_upstream {
+            return Err("No upstream branch to pull from".to_string());
+        }
+        run_git_checked(&path, &["pull", "--no-edit"]).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Fetch from the remote so the local ahead/behind counts reflect the latest
@@ -1001,13 +1060,17 @@ async fn git_pull(path: String) -> Result<(), String> {
 /// fetch fails fast instead of hanging. Errs when there's no remote configured.
 #[tauri::command]
 async fn git_fetch(path: String) -> Result<(), String> {
-    let has_remote = git_str(&path, &["remote"])
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if !has_remote {
-        return Err("No git remote configured".to_string());
-    }
-    run_git_checked(&path, &["fetch", "--prune"]).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let has_remote = git_str(&path, &["remote"])
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !has_remote {
+            return Err("No git remote configured".to_string());
+        }
+        run_git_checked(&path, &["fetch", "--prune"]).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Commit subjects (one per entry, newest first) of the local commits a push
@@ -1055,39 +1118,47 @@ fn git_unpushed_commits_blocking(path: &str) -> Result<Vec<String>, String> {
 /// Local branch names, ordered by most-recent commit first (the same order the
 /// branch switcher shows). Errs when the path isn't a git work tree.
 #[tauri::command]
-fn git_branches(path: String) -> Result<Vec<String>, String> {
-    let out = run_git_checked(
-        &path,
-        &[
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format=%(refname:short)",
-            "refs/heads",
-        ],
-    )?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
+async fn git_branches(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let out = run_git_checked(
+            &path,
+            &[
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname:short)",
+                "refs/heads",
+            ],
+        )?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Switch to `branch`. When `create` is set, make it first (`checkout -b`) so a
 /// brand-new branch is created off the current HEAD and checked out. Git's own
 /// error (e.g. local changes would be overwritten) is surfaced to the caller.
 #[tauri::command]
-fn git_checkout(path: String, branch: String, create: bool) -> Result<(), String> {
-    let trimmed = branch.trim();
-    if trimmed.is_empty() {
+async fn git_checkout(path: String, branch: String, create: bool) -> Result<(), String> {
+    if branch.trim().is_empty() {
         return Err("Branch name is empty".to_string());
     }
-    let args: Vec<&str> = if create {
-        vec!["checkout", "-b", trimmed]
-    } else {
-        vec!["checkout", trimmed]
-    };
-    run_git_checked(&path, &args).map(|_| ())
+    tauri::async_runtime::spawn_blocking(move || {
+        let trimmed = branch.trim();
+        let args: Vec<&str> = if create {
+            vec!["checkout", "-b", trimmed]
+        } else {
+            vec!["checkout", trimmed]
+        };
+        run_git_checked(&path, &args).map(|_| ())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Path to the persisted app-state file in the app data dir. The directory is
@@ -1337,10 +1408,32 @@ fn pty_spawn(
     drop(pair.slave);
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
     let output_event = format!("pty://output/{id}");
     let exit_event = format!("pty://exit/{id}");
+
+    // Dedicated writer thread (see PtySession): owns the master and writer so a
+    // blocking ConPTY write can never run on the main thread. Exits when the
+    // session is removed (the sender drops, closing the channel) or a write
+    // fails (the child side of the pipe is gone); dropping the master here then
+    // closes the PTY.
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel::<PtyMsg>();
+    let master: Box<dyn MasterPty + Send> = pair.master;
+    thread::spawn(move || {
+        for msg in writer_rx {
+            match msg {
+                PtyMsg::Data(bytes) => {
+                    if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                        break;
+                    }
+                }
+                PtyMsg::Resize(size) => {
+                    let _ = master.resize(size);
+                }
+            }
+        }
+    });
 
     // Register the session before the reader thread emits, so the first bytes
     // (the shell banner/prompt) are never dropped. The frontend attaches its
@@ -1348,8 +1441,7 @@ fn pty_spawn(
     state.sessions.lock().unwrap().insert(
         id,
         PtySession {
-            master: pair.master,
-            writer,
+            writer_tx,
             child,
             cwd,
         },
@@ -1442,13 +1534,12 @@ fn pty_spawn(
 
 #[tauri::command]
 fn pty_write(state: State<PtyManager>, id: String, data: String) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
-    if let Some(session) = sessions.get_mut(&id) {
-        session
-            .writer
-            .write_all(data.as_bytes())
-            .map_err(|e| e.to_string())?;
-        session.writer.flush().map_err(|e| e.to_string())?;
+    let sessions = state.sessions.lock().unwrap();
+    if let Some(session) = sessions.get(&id) {
+        // Enqueue only — the writer thread does the (possibly blocking) write.
+        // A send error means the writer thread already exited (child gone);
+        // the reader side will emit the exit event, so drop it silently.
+        let _ = session.writer_tx.send(PtyMsg::Data(data.into_bytes()));
     }
     Ok(())
 }
@@ -1457,15 +1548,12 @@ fn pty_write(state: State<PtyManager>, id: String, data: String) -> Result<(), S
 fn pty_resize(state: State<PtyManager>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     let sessions = state.sessions.lock().unwrap();
     if let Some(session) = sessions.get(&id) {
-        session
-            .master
-            .resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
+        let _ = session.writer_tx.send(PtyMsg::Resize(PtySize {
+            rows: rows.max(1),
+            cols: cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        }));
     }
     Ok(())
 }
@@ -1485,7 +1573,15 @@ fn pty_kill(state: State<PtyManager>, id: String) -> Result<(), String> {
 /// Get-Clipboard`) is blocked. Old files are pruned so the directory can't grow
 /// without bound.
 #[tauri::command]
-fn save_pasted_image(data_base64: String, ext: String) -> Result<String, String> {
+async fn save_pasted_image(data_base64: String, ext: String) -> Result<String, String> {
+    // Async + spawn_blocking: a pasted screenshot is a multi-MB base64 decode
+    // plus a temp-dir prune and disk write — noticeable jank on the main thread.
+    tauri::async_runtime::spawn_blocking(move || save_pasted_image_blocking(data_base64, ext))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn save_pasted_image_blocking(data_base64: String, ext: String) -> Result<String, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_base64.as_bytes())
@@ -1641,7 +1737,25 @@ fn lsp_spawn(
     log::info!("LSP: spawned server for {root}");
 
     let stdout = child.stdout.take().ok_or("language server has no stdout")?;
-    let stdin = child.stdin.take().ok_or("language server has no stdin")?;
+    let mut stdin = child.stdin.take().ok_or("language server has no stdin")?;
+
+    // Dedicated writer thread (see LspSession): owns stdin, prepends the LSP
+    // Content-Length framing, and absorbs pipe-full blocking off the main
+    // thread. Exits when the session is removed (sender drops) or a write
+    // fails (server exited); dropping stdin then closes the pipe.
+    let (writer_tx, writer_rx) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for message in writer_rx {
+            // Content-Length is the byte length of the UTF-8 payload.
+            let header = format!("Content-Length: {}\r\n\r\n", message.len());
+            if stdin.write_all(header.as_bytes()).is_err()
+                || stdin.write_all(message.as_bytes()).is_err()
+                || stdin.flush().is_err()
+            {
+                break;
+            }
+        }
+    });
 
     // Drain stderr so it can't fill the pipe and block the server, and so its
     // diagnostics surface in the log.
@@ -1663,7 +1777,7 @@ fn lsp_spawn(
         .sessions
         .lock()
         .unwrap()
-        .insert(root.clone(), LspSession { child, stdin });
+        .insert(root.clone(), LspSession { child, writer_tx });
 
     // Parse Content-Length framed messages and relay each to the main webview.
     let app_handle = app.clone();
@@ -1712,19 +1826,12 @@ fn lsp_spawn(
 
 #[tauri::command]
 fn lsp_send(state: State<LspManager>, root: String, message: String) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
-    if let Some(session) = sessions.get_mut(&root) {
-        // Content-Length is the byte length of the UTF-8 payload.
-        let header = format!("Content-Length: {}\r\n\r\n", message.len());
-        session
-            .stdin
-            .write_all(header.as_bytes())
-            .map_err(|e| e.to_string())?;
-        session
-            .stdin
-            .write_all(message.as_bytes())
-            .map_err(|e| e.to_string())?;
-        session.stdin.flush().map_err(|e| e.to_string())?;
+    let sessions = state.sessions.lock().unwrap();
+    if let Some(session) = sessions.get(&root) {
+        // Enqueue only — the writer thread frames and does the (possibly
+        // blocking) write. A send error means the server already exited; the
+        // reader side emits the exit event, so drop it silently.
+        let _ = session.writer_tx.send(message);
     }
     Ok(())
 }
@@ -3025,16 +3132,31 @@ fn sum_usage(
 }
 
 /// CPU + memory for the whole app, attributed to App core and each open project.
+/// Async + spawn_blocking: the system-wide process refresh below opens a handle
+/// to (potentially) every process on the machine, which on Windows — especially
+/// under AV/EDR hooking — can take hundreds of ms per poll. As a sync command it
+/// ran on the main thread every few seconds and was the largest single source of
+/// recurring UI stalls.
 #[tauri::command]
-fn resource_stats(
+async fn resource_stats(
     app: AppHandle,
-    monitor: State<ResourceMonitor>,
-    pty: State<PtyManager>,
-    lsp: State<LspManager>,
-    wv: State<WebviewProcessMap>,
+    roots: Vec<String>,
+    browsers: Vec<BrowserOwner>,
+) -> Result<ResourceReport, String> {
+    tauri::async_runtime::spawn_blocking(move || resource_stats_blocking(&app, roots, browsers))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn resource_stats_blocking(
+    app: &AppHandle,
     roots: Vec<String>,
     browsers: Vec<BrowserOwner>,
 ) -> ResourceReport {
+    let monitor = app.state::<ResourceMonitor>();
+    let pty = app.state::<PtyManager>();
+    let lsp = app.state::<LspManager>();
+    let wv = app.state::<WebviewProcessMap>();
     // Kick off an async refresh of the WebView2 renderer map (Windows only) and
     // read the latest snapshot. The first poll sees an empty map (browsers fold
     // into App core) and self-corrects on the next tick.
@@ -3047,10 +3169,8 @@ fn resource_stats(
     // keeps the status-bar poll off the paint/input path in the common case.
     #[cfg(windows)]
     if !browsers.is_empty() {
-        webview_procs::refresh(&app, wv.renderers.clone());
+        webview_procs::refresh(app, wv.renderers.clone());
     }
-    #[cfg(not(windows))]
-    let _ = &app;
     let renderer_map = wv.renderers.lock().unwrap().clone();
 
     // Renderer pid -> owning project root, joined by frame-URL host. Browser
@@ -3092,7 +3212,17 @@ fn resource_stats(
 
     let mut sys = monitor.sys.lock().unwrap();
     sys.refresh_memory();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    // Minimal per-process refresh: CPU + memory only. The default "everything"
+    // refresh also reads each process's exe path, command line, environment,
+    // and cwd — an OpenProcess + PEB read for every process on the system,
+    // which is what made this poll expensive. Name and parent pid (all the
+    // tree walk needs) come with the base process listing; command lines are
+    // loaded separately below for just the terminal subtrees.
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cpu().with_memory(),
+    );
     let ncpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1) as f32;
@@ -3166,9 +3296,10 @@ fn resource_stats(
     let mut app_pids = Vec::new();
     collect_subtree(host, &children, &present, &mut claimed, &mut app_pids);
 
-    // Load command lines for just the terminal pids (the default refresh skips
-    // cmd) so we can tell a Claude session from a plain shell — a Node-hosted
-    // `claude` only shows "claude" in its cmd-line script path.
+    // Load command lines + exe paths for just the terminal pids (the minimal
+    // refresh above skips both) so we can tell a Claude session from a plain
+    // shell — a Node-hosted `claude` only shows "claude" in its cmd-line script
+    // path, while the native binary shows it in the exe.
     let term_pid_list: Vec<Pid> = proj_pids
         .iter()
         .flat_map(|p| p.pty_subtrees.iter().flatten().copied())
@@ -3178,7 +3309,9 @@ fn resource_stats(
         sys.refresh_processes_specifics(
             ProcessesToUpdate::Some(&term_pid_list),
             false,
-            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::Always)
+                .with_exe(UpdateKind::Always),
         );
     }
 
@@ -3289,6 +3422,68 @@ fn resource_stats(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Boxed with an explicit signature: the macro's closure is generic over the
+    // runtime, which can't be inferred at a plain `let` binding.
+    let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
+        Box::new(tauri::generate_handler![
+        read_project_tree,
+        watch_project_tree,
+        unwatch_project_tree,
+        read_file_text,
+        write_file_text,
+        prettier_format,
+        read_prettier_config_files,
+        find_project_favicon,
+        git_current_branch,
+        git_diff,
+        git_status,
+        git_stage,
+        git_unstage,
+        git_commit,
+        git_push,
+        git_pull,
+        git_fetch,
+        git_unpushed_commits,
+        git_branches,
+        git_checkout,
+        read_state,
+        write_state,
+        list_shells,
+        detect_claude_path,
+        validate_claude_path,
+        pty_spawn,
+        pty_write,
+        pty_resize,
+        pty_kill,
+        save_pasted_image,
+        lsp_spawn,
+        lsp_send,
+        lsp_kill,
+        lsp_status,
+        browser_create,
+        browser_navigate,
+        browser_reload,
+        browser_back,
+        browser_forward,
+        browser_set_bounds,
+        browser_show,
+        browser_hide,
+        browser_close,
+        browser_get_url,
+        browser_set_active,
+        browser_pick_start,
+        browser_pick_stop,
+        browser_pick_toast,
+        claude_browser_mcp_config,
+        claude_usage,
+        resource_stats,
+        frontend_log,
+        jira::jira_status,
+        jira::jira_connect,
+        jira::jira_disconnect,
+        jira::jira_resolve_branch,
+        jira::open_external
+    ]);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -3318,65 +3513,17 @@ pub fn run() {
         .manage(ResourceMonitor::default())
         .manage(WebviewProcessMap::default())
         .manage(jira::JiraState::default())
-        .invoke_handler(tauri::generate_handler![
-            read_project_tree,
-            watch_project_tree,
-            unwatch_project_tree,
-            read_file_text,
-            write_file_text,
-            prettier_format,
-            read_prettier_config_files,
-            find_project_favicon,
-            git_current_branch,
-            git_diff,
-            git_status,
-            git_stage,
-            git_unstage,
-            git_commit,
-            git_push,
-            git_pull,
-            git_fetch,
-            git_unpushed_commits,
-            git_branches,
-            git_checkout,
-            read_state,
-            write_state,
-            list_shells,
-            detect_claude_path,
-            validate_claude_path,
-            pty_spawn,
-            pty_write,
-            pty_resize,
-            pty_kill,
-            save_pasted_image,
-            lsp_spawn,
-            lsp_send,
-            lsp_kill,
-            lsp_status,
-            browser_create,
-            browser_navigate,
-            browser_reload,
-            browser_back,
-            browser_forward,
-            browser_set_bounds,
-            browser_show,
-            browser_hide,
-            browser_close,
-            browser_get_url,
-            browser_set_active,
-            browser_pick_start,
-            browser_pick_stop,
-            browser_pick_toast,
-            claude_browser_mcp_config,
-            claude_usage,
-            resource_stats,
-            frontend_log,
-            jira::jira_status,
-            jira::jira_connect,
-            jira::jira_disconnect,
-            jira::jira_resolve_branch,
-            jira::open_external
-        ])
+        // Wrap the generated handler so the native watchdog knows which command
+        // is executing. Sync commands run to completion inside this call (on
+        // the main thread — the very thing the watchdog monitors); async ones
+        // just dispatch, so their entry is set and cleared in microseconds.
+        .invoke_handler(move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+            let cmd = invoke.message.command().to_string();
+            watchdog::command_started(&cmd);
+            let handled = handler(invoke);
+            watchdog::command_finished(&cmd);
+            handled
+        })
         // Lifecycle breadcrumbs: a crash leaves no CloseRequested before the
         // process ends, a normal quit logs one — that distinction is the first
         // thing to check in the log after an unexpected exit.
@@ -3403,6 +3550,11 @@ pub fn run() {
                 .app_log_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             install_panic_hook(log_dir);
+            // Native main-thread watchdog: logs when the event loop stops
+            // responding and which command was running (see watchdog.rs) —
+            // the counterpart of the frontend watchdog, which only sees
+            // JS-thread stalls.
+            watchdog::start(app.handle().clone());
             log::info!(
                 "Meridian v{} started (debug={})",
                 env!("CARGO_PKG_VERSION"),

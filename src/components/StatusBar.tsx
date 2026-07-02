@@ -324,7 +324,9 @@ function useResourceStats(
         });
     };
     refresh();
-    const interval = setInterval(refresh, fast ? 2000 : 3000);
+    // 10 s at rest — the scan enumerates every process on the machine, so keep
+    // it infrequent; 2 s while the detail popup is open for a live feel.
+    const interval = setInterval(refresh, fast ? 2000 : 10_000);
     window.addEventListener("focus", refresh);
     return () => {
       active = false;

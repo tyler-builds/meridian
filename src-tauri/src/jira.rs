@@ -205,9 +205,14 @@ fn build_status(app: &AppHandle, error: Option<String>) -> JiraStatus {
     }
 }
 
+/// Async + spawn_blocking: `build_status` reads the OS credential store
+/// (multiple chunked entries — an RPC per read on Windows), which is not
+/// something to do on the main thread.
 #[tauri::command]
-pub fn jira_status(app: AppHandle) -> JiraStatus {
-    build_status(&app, None)
+pub async fn jira_status(app: AppHandle) -> Result<JiraStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || build_status(&app, None))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
