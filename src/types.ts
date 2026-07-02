@@ -16,7 +16,7 @@ export type PaneNode =
 /** A tab inside a project's main panel. */
 export interface MainTab {
   id: string;
-  kind: "terminal" | "file" | "browser" | "git" | "notes";
+  kind: "terminal" | "file" | "browser" | "git" | "notes" | "search";
   title: string;
   /** For file tabs: path relative to the project root (POSIX). */
   relPath?: string;

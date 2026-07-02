@@ -12,7 +12,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GitBranch, Globe, NotebookPen, Plus, Terminal, X } from "lucide-react";
+import { GitBranch, Globe, NotebookPen, Plus, Search, Terminal, X } from "lucide-react";
 
 import type { MainTab } from "@/types";
 import { cn } from "@/lib/utils";
@@ -104,6 +104,12 @@ function MainTabItem({
           strokeWidth={1.8}
           className={cn("shrink-0", active ? "text-fg-subtle" : "text-fg-faint")}
         />
+      ) : tab.kind === "search" ? (
+        <Search
+          size={14}
+          strokeWidth={1.8}
+          className={cn("shrink-0", active ? "text-fg-subtle" : "text-fg-faint")}
+        />
       ) : (
         <FileTypeIcon
           path={tab.relPath ?? tab.title}
@@ -152,6 +158,7 @@ export function MainTabBar({
   onNewClaude,
   onNewGit,
   onNewNotes,
+  onNewSearch,
 }: {
   tabs: MainTab[];
   activeId: string | null;
@@ -163,6 +170,7 @@ export function MainTabBar({
   onNewClaude: () => void;
   onNewGit: () => void;
   onNewNotes: () => void;
+  onNewSearch: () => void;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -228,6 +236,10 @@ export function MainTabBar({
           <DropdownMenuItem onSelect={onNewNotes}>
             <NotebookPen size={15} strokeWidth={1.8} />
             Notes
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onNewSearch}>
+            <Search size={15} strokeWidth={1.8} />
+            Search
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={onNewClaude}>
             <ClaudeIcon size={15} />

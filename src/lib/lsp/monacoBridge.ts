@@ -42,12 +42,49 @@ const openFileHandlers = new Map<
   (rel: string, selection?: monaco.IRange | monaco.IPosition) => void
 >();
 
+/**
+ * Reveals requested while a project had no EditorPanel mounted (no file tabs
+ * open → no registered handler). Drained through the handler the moment it
+ * registers, so e.g. a search-result click in a fresh project still lands on
+ * the right line.
+ */
+const pendingOpens = new Map<
+  string,
+  { rel: string; selection?: monaco.IRange | monaco.IPosition }
+>();
+
 export function registerOpenFileHandler(
   root: string,
   fn: (rel: string, selection?: monaco.IRange | monaco.IPosition) => void,
 ): () => void {
   openFileHandlers.set(root, fn);
+  const pending = pendingOpens.get(root);
+  if (pending) {
+    pendingOpens.delete(root);
+    fn(pending.rel, pending.selection);
+  }
   return () => openFileHandlers.delete(root);
+}
+
+/**
+ * Open `rel` in `root`'s editor, revealing `selection` — the same path
+ * cross-file go-to-definition takes. When the project has no editor mounted
+ * yet, `fallback` must open the file tab (mounting the editor); the reveal is
+ * stashed and replayed when the editor registers its handler.
+ */
+export function openProjectFile(
+  root: string,
+  rel: string,
+  selection: monaco.IRange | monaco.IPosition | undefined,
+  fallback: () => void,
+): void {
+  const handler = openFileHandlers.get(root);
+  if (handler) {
+    handler(rel, selection);
+  } else {
+    pendingOpens.set(root, { rel, selection });
+    fallback();
+  }
 }
 
 function docToMarkdown(

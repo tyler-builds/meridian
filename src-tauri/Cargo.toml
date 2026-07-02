@@ -55,6 +55,11 @@ sysinfo = "0.33"
 # notification and re-exports `notify` itself. On Windows it uses a single
 # recursive ReadDirectoryChangesW handle per project root (cheap).
 notify-debouncer-mini = "0.4"
+# Full-repo content search (the Search tab): ripgrep's engine as a library.
+# `grep` is the regex matcher + line searcher; `ignore` is the gitignore-aware
+# parallel directory walker with VS Code-style include/exclude override globs.
+grep = "0.3"
+ignore = "0.4"
 # Minimal blocking HTTP/1.1 server powering the in-process MCP endpoint the
 # in-app `claude` connects to for the `@browser` feature (see mcp.rs). Bound to
 # 127.0.0.1 only; each request is gated by a per-install bearer secret.

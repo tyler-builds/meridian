@@ -70,6 +70,46 @@ export function onProjectFilesChange(
   );
 }
 
+/** One matching line from a full-repo search. */
+export interface SearchMatch {
+  /** Path relative to the search root, POSIX separators. */
+  path: string;
+  /** 1-based line number. */
+  line: number;
+  /** The matched line (long lines are windowed around the first match). */
+  text: string;
+  /** [start, end) match offsets into `text`, in JS string (UTF-16) indices. */
+  spans: [number, number][];
+}
+
+export interface SearchResults {
+  matches: SearchMatch[];
+  /** Number of distinct files with at least one match. */
+  files: number;
+  /** True when the result cap was hit — more matches exist on disk. */
+  truncated: boolean;
+}
+
+/**
+ * Full-repo content search (ripgrep's engine in-process; respects .gitignore).
+ * `regex:false` treats the query as a literal. `include`/`exclude` are
+ * comma-separated globs relative to the root (empty string = no filter).
+ */
+export function searchProject(
+  root: string,
+  query: string,
+  opts: { regex: boolean; caseSensitive: boolean; include: string; exclude: string },
+): Promise<SearchResults> {
+  return invoke<SearchResults>("search_project", {
+    root,
+    query,
+    regex: opts.regex,
+    caseSensitive: opts.caseSensitive,
+    include: opts.include,
+    exclude: opts.exclude,
+  });
+}
+
 /** Read a UTF-8 text file (project root + relative path) for the editor. */
 export function readFileText(root: string, rel: string): Promise<string> {
   return invoke<string>("read_file_text", { root, rel });

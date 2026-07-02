@@ -376,6 +376,31 @@ export default function App() {
     [updateProject],
   );
 
+  // Bumped whenever the search shortcut fires so an already-open SearchPanel
+  // refocuses its input.
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0);
+  const newSearch = useCallback(
+    (projectId: string) => {
+      updateProject(projectId, (t) => {
+        // One search tab per project; focus the existing one if present.
+        const existing = t.mainTabs.find((m) => m.kind === "search");
+        if (existing) return { ...t, activeMainTabId: existing.id };
+        const newTab: MainTab = {
+          id: crypto.randomUUID(),
+          kind: "search",
+          title: "Search",
+        };
+        return {
+          ...t,
+          mainTabs: [...t.mainTabs, newTab],
+          activeMainTabId: newTab.id,
+        };
+      });
+      setSearchFocusNonce((n) => n + 1);
+    },
+    [updateProject],
+  );
+
   const newBrowser = useCallback(
     (projectId: string) => {
       updateProject(projectId, (t) => {
@@ -842,6 +867,14 @@ export default function App() {
         return;
       }
 
+      // Mod+Shift+F: full-repo search tab for the active project.
+      if (key === "f" && e.shiftKey) {
+        if (!project) return;
+        stop();
+        newSearch(project.id);
+        return;
+      }
+
       if (key === "d") {
         // Split only applies to terminals; leave Mod+D for Monaco otherwise.
         if (!project || main?.kind !== "terminal" || !main.activePaneId) return;
@@ -876,6 +909,7 @@ export default function App() {
     closePane,
     closeMainTab,
     toggleSidebar,
+    newSearch,
   ]);
 
   return (
@@ -921,6 +955,8 @@ export default function App() {
                   onNewClaude={newClaude}
                   onNewGit={newGit}
                   onNewNotes={newNotes}
+                  onNewSearch={newSearch}
+                  searchFocusNonce={searchFocusNonce}
                   onCloseMainTab={closeMainTab}
                   onReorderMainTab={reorderMainTab}
                   onSelectMainTab={selectMainTab}

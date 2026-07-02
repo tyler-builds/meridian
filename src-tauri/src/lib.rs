@@ -15,6 +15,7 @@ use tauri::{
 
 mod jira;
 mod mcp;
+mod search;
 mod watchdog;
 #[cfg(windows)]
 mod webview_procs;
@@ -3516,6 +3517,7 @@ pub fn run() {
     // runtime, which can't be inferred at a plain `let` binding.
     let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> =
         Box::new(tauri::generate_handler![
+        search::search_project,
         read_project_tree,
         watch_project_tree,
         unwatch_project_tree,

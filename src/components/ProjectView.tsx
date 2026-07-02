@@ -17,6 +17,7 @@ import { EditorPanel } from "@/components/EditorPanel";
 import { BrowserPanel } from "@/components/BrowserPanel";
 import { GitPanel } from "@/components/GitPanel";
 import { NotesPanel } from "@/components/NotesPanel";
+import { SearchPanel } from "@/components/SearchPanel";
 import { MainTabBar } from "@/components/MainTabBar";
 import { MainEmptyState } from "@/components/MainEmptyState";
 import {
@@ -40,6 +41,8 @@ export function ProjectView({
   onNewClaude,
   onNewGit,
   onNewNotes,
+  onNewSearch,
+  searchFocusNonce,
   onCloseMainTab,
   onReorderMainTab,
   onSelectMainTab,
@@ -67,6 +70,9 @@ export function ProjectView({
   onNewClaude: (projectId: string) => void;
   onNewGit: (projectId: string) => void;
   onNewNotes: (projectId: string) => void;
+  onNewSearch: (projectId: string) => void;
+  /** Bumped each time the search shortcut fires, to refocus the query input. */
+  searchFocusNonce: number;
   onCloseMainTab: (projectId: string, mainTabId: string) => void;
   onReorderMainTab: (projectId: string, fromId: string, toId: string) => void;
   onSelectMainTab: (projectId: string, mainTabId: string) => void;
@@ -206,6 +212,7 @@ export function ProjectView({
             onNewClaude={() => onNewClaude(tab.id)}
             onNewGit={() => onNewGit(tab.id)}
             onNewNotes={() => onNewNotes(tab.id)}
+            onNewSearch={() => onNewSearch(tab.id)}
           />
 
           {activeTerminal && (
@@ -378,6 +385,27 @@ export function ProjectView({
                     <NotesPanel
                       root={tab.path}
                       onOpenUrl={(url) => onOpenBrowserUrl(tab.id, url)}
+                    />
+                  </div>
+                ))}
+
+              {/* Search tabs: full-repo content search. Kept mounted so the
+                  query, options and results survive tab switches. */}
+              {tab.mainTabs
+                .filter((t) => t.kind === "search")
+                .map((t) => (
+                  <div
+                    key={t.id}
+                    className={cn(
+                      "absolute inset-0",
+                      tab.activeMainTabId === t.id ? "block" : "hidden",
+                    )}
+                  >
+                    <SearchPanel
+                      root={tab.path}
+                      active={active && tab.activeMainTabId === t.id}
+                      focusNonce={searchFocusNonce}
+                      onOpenFile={(rel) => onOpenFile(tab.id, rel)}
                     />
                   </div>
                 ))}
