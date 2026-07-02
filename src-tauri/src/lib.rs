@@ -150,12 +150,21 @@ async fn read_project_tree(path: String) -> Result<Vec<String>, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Holds one live filesystem watcher per project (keyed by a frontend-supplied
-/// id). Dropping a `Debouncer` stops its background thread and releases the OS
+/// One project's watcher slot. `Pending` reserves the id while `watch_project_tree`
+/// runs its seed walk (which can take seconds), so an unwatch arriving in that
+/// window still has an entry to remove — otherwise the finished setup would
+/// insert a watcher for an already-closed project and leak it until app exit.
+enum TreeWatcher {
+    Pending,
+    Live(Debouncer<RecommendedWatcher>),
+}
+
+/// Holds one filesystem watcher per project (keyed by a frontend-supplied id).
+/// Dropping a `Debouncer` stops its background thread and releases the OS
 /// watch, so removing an entry is all that's needed to unwatch.
 #[derive(Default)]
 struct TreeWatcherManager {
-    watchers: Mutex<HashMap<String, Debouncer<RecommendedWatcher>>>,
+    watchers: Mutex<HashMap<String, TreeWatcher>>,
 }
 
 /// True when a changed path is one the tree would actually show — i.e. it isn't
@@ -181,34 +190,46 @@ async fn watch_project_tree(
     id: String,
     path: String,
 ) -> Result<(), String> {
-    if state.watchers.lock().unwrap().contains_key(&id) {
-        return Ok(());
-    }
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("Not a directory: {path}"));
     }
+    // Reserve the id (atomically with the already-watched check) before the
+    // slow seed walk, so an unwatch during setup has an entry to remove and the
+    // insert below can tell the project was closed in the meantime.
+    {
+        let mut watchers = state.watchers.lock().unwrap();
+        if watchers.contains_key(&id) {
+            return Ok(());
+        }
+        watchers.insert(id.clone(), TreeWatcher::Pending);
+    }
 
-    // Seed with the current tree so the first event (or a content-only change)
-    // doesn't re-emit an identical list — the frontend already has this from its
-    // initial `read_project_tree`. Walked off the main thread (same reason
-    // `read_project_tree` is async): a full disk walk can take seconds.
+    // Seed the change-detection baseline with the current tree, walked off the
+    // main thread (same reason `read_project_tree` is async): a full disk walk
+    // can take seconds.
     let seed_root = root.clone();
-    let seed = tauri::async_runtime::spawn_blocking(move || {
+    let seed = match tauri::async_runtime::spawn_blocking(move || {
         let mut out = Vec::new();
         walk(&seed_root, &seed_root, &mut out, 0);
         out.sort();
         out
     })
     .await
-    .map_err(|e| e.to_string())?;
-    let last: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(seed));
+    {
+        Ok(seed) => seed,
+        Err(e) => {
+            state.watchers.lock().unwrap().remove(&id);
+            return Err(e.to_string());
+        }
+    };
+    let last: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(seed.clone()));
 
     let event_root = root.clone();
     let event_name = format!("tree://change/{id}");
     let app_handle = app.clone();
 
-    let mut debouncer = new_debouncer(
+    let debouncer_result = new_debouncer(
         std::time::Duration::from_millis(300),
         move |res: DebounceEventResult| {
             // Errors (e.g. a watch-buffer overflow during a massive burst) are
@@ -233,22 +254,53 @@ async fn watch_project_tree(
             drop(guard);
             let _ = app_handle.emit_to("main", &event_name, out);
         },
-    )
-    .map_err(|e| e.to_string())?;
+    );
+    let mut debouncer = match debouncer_result {
+        Ok(d) => d,
+        Err(e) => {
+            state.watchers.lock().unwrap().remove(&id);
+            return Err(e.to_string());
+        }
+    };
+    if let Err(e) = debouncer.watcher().watch(&root, RecursiveMode::Recursive) {
+        state.watchers.lock().unwrap().remove(&id);
+        return Err(e.to_string());
+    }
 
-    debouncer
-        .watcher()
-        .watch(&root, RecursiveMode::Recursive)
-        .map_err(|e| e.to_string())?;
+    {
+        let mut watchers = state.watchers.lock().unwrap();
+        match watchers.get(&id) {
+            // Still reserved — promote to the live watcher.
+            Some(TreeWatcher::Pending) => {
+                watchers.insert(id.clone(), TreeWatcher::Live(debouncer));
+            }
+            // Unwatched during setup — the project was closed. Drop the
+            // debouncer off-thread (drop joins its worker) and don't emit.
+            None => {
+                drop(watchers);
+                thread::spawn(move || drop(debouncer));
+                return Ok(());
+            }
+            // Unreachable: only this function inserts, and a concurrent call
+            // for the same id would have bailed on the Pending reservation.
+            Some(TreeWatcher::Live(_)) => return Ok(()),
+        }
+    }
 
-    state.watchers.lock().unwrap().insert(id, debouncer);
+    // Emit the seed unconditionally: the frontend's tree came from an earlier
+    // `read_project_tree` snapshot, and anything that changed between that walk
+    // and this watcher attaching would otherwise match the baseline and never
+    // be emitted — leaving the tree stale until the next disk change.
+    let _ = app.emit_to("main", &format!("tree://change/{id}"), seed);
     Ok(())
 }
 
-/// Stop watching a project root and release its OS watch.
+/// Stop watching a project root and release its OS watch. Removing a `Pending`
+/// entry (setup still running) is enough on its own: `watch_project_tree` sees
+/// the missing reservation when it finishes and discards its watcher.
 #[tauri::command]
 fn unwatch_project_tree(state: State<TreeWatcherManager>, id: String) {
-    if let Some(watcher) = state.watchers.lock().unwrap().remove(&id) {
+    if let Some(TreeWatcher::Live(watcher)) = state.watchers.lock().unwrap().remove(&id) {
         // Dropping a Debouncer joins its worker thread, which may be mid
         // full-disk walk of a large project — drop it off the main thread so
         // closing a project can't stall the UI for the rest of the walk.
