@@ -141,6 +141,12 @@ jobs:
           # fails. Add both as repository secrets before tagging.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Meridian's Jira OAuth app credentials, baked into the binary by
+          # src-tauri/build.rs (local dev reads them from src-tauri/.env
+          # instead). Without these secrets the build ships with Jira
+          # unconfigured — the Connections card says so.
+          MERIDIAN_JIRA_CLIENT_ID: ${{ secrets.MERIDIAN_JIRA_CLIENT_ID }}
+          MERIDIAN_JIRA_CLIENT_SECRET: ${{ secrets.MERIDIAN_JIRA_CLIENT_SECRET }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}

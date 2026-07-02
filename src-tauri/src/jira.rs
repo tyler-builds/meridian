@@ -194,11 +194,14 @@ pub struct JiraStatus {
 fn build_status(app: &AppHandle, error: Option<String>) -> JiraStatus {
     let meta = load_meta(app);
     let has_refresh = load_refresh().is_some();
-    let connected = has_refresh && !meta.cloud_id.is_empty() && !meta.needs_reconnect;
+    let has_app = built_in_app().is_some();
+    // A build without app credentials can never refresh the access token, so
+    // stored auth from a configured build must not read as "connected" here.
+    let connected = has_app && has_refresh && !meta.cloud_id.is_empty() && !meta.needs_reconnect;
     JiraStatus {
         connected,
         needs_reconnect: meta.needs_reconnect && has_refresh,
-        has_app: built_in_app().is_some(),
+        has_app,
         site_url: (!meta.site_url.is_empty()).then(|| meta.site_url.clone()),
         account_name: (!meta.account_name.is_empty()).then(|| meta.account_name.clone()),
         error,
