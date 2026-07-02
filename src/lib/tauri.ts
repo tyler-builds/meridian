@@ -54,6 +54,22 @@ export function onProjectTreeChange(
   return listen<string[]>(`tree://change/${id}`, (e) => cb(e.payload));
 }
 
+/**
+ * Fired by a project's tree watcher with the relative POSIX paths that changed
+ * on disk (created/deleted/renamed *and* content-only edits — unlike
+ * `onProjectTreeChange`, which only fires when the path set changes). One
+ * global event for all watched projects; filter on `root`, which is echoed
+ * verbatim from the `watchProjectTree` call. Lets open editors reload files
+ * modified outside the app.
+ */
+export function onProjectFilesChange(
+  cb: (change: { root: string; paths: string[] }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ root: string; paths: string[] }>("files://change", (e) =>
+    cb(e.payload),
+  );
+}
+
 /** Read a UTF-8 text file (project root + relative path) for the editor. */
 export function readFileText(root: string, rel: string): Promise<string> {
   return invoke<string>("read_file_text", { root, rel });

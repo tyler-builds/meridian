@@ -4,7 +4,7 @@ import { monaco } from "@/lib/monaco";
 import { registerModelFile, unregisterModelFile } from "@/lib/format";
 import { lspManager } from "@/lib/lsp/manager";
 import { registerLspProviders, registerOpenFileHandler } from "@/lib/lsp/monacoBridge";
-import { readFileText, writeFileText } from "@/lib/tauri";
+import { onProjectFilesChange, readFileText, writeFileText } from "@/lib/tauri";
 import { useSettings } from "@/lib/settings";
 
 /** Files the TypeScript/JavaScript language server handles. */
@@ -44,6 +44,9 @@ export function EditorPanel({
   const savedVersionRef = useRef<Map<string, number>>(new Map());
   const lastDirtyRef = useRef<Map<string, boolean>>(new Map());
   const listenersRef = useRef<Map<string, monaco.IDisposable>>(new Map());
+  // Content of each file's most recent in-app save, so the watcher echo of our
+  // own write isn't mistaken for an external change (see the reload effect).
+  const selfWriteRef = useRef<Map<string, string>>(new Map());
 
   // Keep latest props reachable from stable callbacks.
   const rootRef = useRef(root);
@@ -91,7 +94,9 @@ export function EditorPanel({
           /* formatting failed (e.g. syntax error); save the file as-is */
         }
       }
-      await writeFileText(rootRef.current, rel, model.getValue());
+      const written = model.getValue();
+      await writeFileText(rootRef.current, rel, written);
+      selfWriteRef.current.set(rel, written);
       savedVersionRef.current.set(rel, model.getAlternativeVersionId());
       reportDirty(rel, false);
     } catch (err) {
@@ -150,10 +155,69 @@ export function EditorPanel({
       viewStatesRef.current.clear();
       savedVersionRef.current.clear();
       lastDirtyRef.current.clear();
+      selfWriteRef.current.clear();
       editorRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Reload open files when they change on disk outside the app (an AI agent,
+  // VS Code, git checkout…). The project's tree watcher emits the changed
+  // relative paths; any matching open model is re-read and, if the disk
+  // content differs from the buffer, replaced. The disk version wins even over
+  // unsaved local edits (deliberate: external tools are the primary writers) —
+  // but the replacement goes through pushEditOperations, so Ctrl+Z can recover
+  // a clobbered buffer. Our own saves are naturally skipped by the
+  // content-equality check.
+  useEffect(() => {
+    let active = true;
+    const reload = async (rel: string) => {
+      const model = modelsRef.current.get(rel);
+      // Only successfully loaded files — never error buffers.
+      if (!model || !savedVersionRef.current.has(rel)) return;
+      let content: string;
+      try {
+        content = await readFileText(rootRef.current, rel);
+      } catch {
+        // Deleted or unreadable: keep the buffer so its contents aren't lost
+        // (the user can still save to recreate the file).
+        return;
+      }
+      if (!active || model.isDisposed()) return;
+      // The echo of our own save arriving via the watcher (up to a debounce
+      // period after Ctrl+S). The buffer may already be ahead of it again —
+      // "reloading" would revert keystrokes typed since the save — so skip by
+      // matching what we wrote, not the current buffer.
+      if (selfWriteRef.current.get(rel) === content) {
+        selfWriteRef.current.delete(rel);
+        return;
+      }
+      if (content === model.getValue()) return;
+      const editor = editorRef.current;
+      const isActive = editor?.getModel() === model;
+      const viewState = isActive ? editor.saveViewState() : null;
+      model.pushEditOperations(
+        [],
+        [{ range: model.getFullModelRange(), text: content }],
+        () => null,
+      );
+      // New clean baseline: the buffer now mirrors the disk.
+      savedVersionRef.current.set(rel, model.getAlternativeVersionId());
+      reportDirty(rel, false);
+      // The full-range replace moves the cursor; put the user back where they
+      // were (Monaco clamps positions that no longer exist).
+      if (isActive && viewState) editor.restoreViewState(viewState);
+    };
+
+    const unlistenPromise = onProjectFilesChange(({ root: evRoot, paths }) => {
+      if (evRoot !== rootRef.current) return;
+      for (const rel of paths) void reload(rel);
+    });
+    return () => {
+      active = false;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [reportDirty]);
 
   // Enable/disable the language server feature globally per the setting.
   useEffect(() => {
@@ -273,6 +337,7 @@ export function EditorPanel({
         viewStatesRef.current.delete(rel);
         savedVersionRef.current.delete(rel);
         lastDirtyRef.current.delete(rel);
+        selfWriteRef.current.delete(rel);
         const uriKey = monaco.Uri.file(`${rootRef.current}/${rel}`).toString();
         unregisterModelFile(uriKey);
         const timer = lspTimersRef.current.get(rel);

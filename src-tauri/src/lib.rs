@@ -227,6 +227,7 @@ async fn watch_project_tree(
 
     let event_root = root.clone();
     let event_name = format!("tree://change/{id}");
+    let files_root = path.clone();
     let app_handle = app.clone();
 
     let debouncer_result = new_debouncer(
@@ -237,11 +238,36 @@ async fn watch_project_tree(
             let Ok(events) = res else {
                 return;
             };
-            if !events
+            let relevant: Vec<&Path> = events
                 .iter()
-                .any(|e| tree_path_relevant(&event_root, &e.path))
-            {
+                .map(|e| e.path.as_path())
+                .filter(|p| tree_path_relevant(&event_root, p))
+                .collect();
+            if relevant.is_empty() {
                 return;
+            }
+            // Relative POSIX paths of everything relevant that changed, deduped.
+            // Unlike the tree emit below, this includes content-only changes —
+            // it's what lets open editor tabs reload files edited outside the
+            // app. `root` is echoed verbatim so the frontend can match it
+            // against its own project root string. (A change reported as the
+            // root dir itself strips to "" and is dropped — no file to reload —
+            // but still triggers the tree re-walk below.)
+            let changed: std::collections::BTreeSet<String> = relevant
+                .iter()
+                .filter_map(|p| p.strip_prefix(&event_root).ok())
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .filter(|rel| !rel.is_empty())
+                .collect();
+            if !changed.is_empty() {
+                let _ = app_handle.emit_to(
+                    "main",
+                    "files://change",
+                    serde_json::json!({
+                        "root": files_root,
+                        "paths": changed.iter().collect::<Vec<_>>(),
+                    }),
+                );
             }
             let mut out = Vec::new();
             walk(&event_root, &event_root, &mut out, 0);
