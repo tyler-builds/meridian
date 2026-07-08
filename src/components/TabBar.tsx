@@ -137,7 +137,8 @@ function ProjectTabItem({
         {/* Attention dot when a Claude tab inside this (non-active) project is
             waiting; derived from its main tabs so it clears once they're viewed.
             Fades on hover so the close button takes the slot. */}
-        {!active && tab.mainTabs.some((m) => m.attention) && (
+        {!active &&
+          Object.values(tab.contents).some((c) => c.attention) && (
           <span className="pointer-events-none absolute h-[7px] w-[7px] rounded-full bg-accent transition-opacity group-hover:opacity-0" />
         )}
         <button

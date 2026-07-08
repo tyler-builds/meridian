@@ -1,9 +1,24 @@
 /**
- * A node in a terminal tab's split layout. Leaves are terminals; splits are
- * recursive containers (a binary tree, like tmux/iTerm/VS Code).
+ * A node in a project's split layout. Splits are recursive containers (a binary
+ * tree, like tmux/iTerm/VS Code editor groups). Leaves are *pane groups*: each
+ * holds an ordered list of content ids (its tabs) and which one is showing.
+ *
+ * The tree owns only layout — it never owns content lifecycle. The living
+ * content (a terminal's PTY, a browser's webview, a Monaco editor) is a
+ * `ContentItem` mounted exactly once at the project level and positioned by the
+ * rect this tree computes for its pane. Moving a content id between panes (a
+ * drag) is therefore a pure tree edit and never remounts the content.
  */
 export type PaneNode =
-  | { type: "leaf"; id: string }
+  | {
+      type: "leaf";
+      /** Stable pane id. */
+      id: string;
+      /** Content ids shown as tabs in this pane, in tab order. */
+      tabs: string[];
+      /** The visible tab, or null for an (transient) empty pane. */
+      activeTabId: string | null;
+    }
   | {
       type: "split";
       id: string;
@@ -13,32 +28,43 @@ export type PaneNode =
       sizes: number[];
     };
 
-/** A tab inside a project's main panel. */
-export interface MainTab {
+/** The kind of content a tab hosts. */
+export type ContentKind =
+  | "terminal"
+  | "file"
+  | "browser"
+  | "git"
+  | "notes"
+  | "search";
+
+/**
+ * A living, mountable unit of content — one terminal, one file editor, one
+ * browser, etc. Mounted once per project and positioned into whichever pane
+ * currently holds it. This is the unit a tab represents.
+ */
+export interface ContentItem {
+  /** Stable id; also the tab id in a pane's `tabs`, and the terminal registry key. */
   id: string;
-  kind: "terminal" | "file" | "browser" | "git" | "notes" | "search";
+  kind: ContentKind;
+  /** Display name shown on the tab. */
   title: string;
-  /** For file tabs: path relative to the project root (POSIX). */
+  /** For file content: path relative to the project root (POSIX). */
   relPath?: string;
-  /** For file tabs: unsaved changes in the editor. */
+  /** For file content: unsaved changes in the editor. Ephemeral — not persisted. */
   dirty?: boolean;
   /**
-   * For terminal tabs: Claude (in one of this tab's panes) finished its turn or
-   * is awaiting input while this tab wasn't the one being viewed. Shown as a dot
-   * on the tab and cleared when the tab is viewed. Ephemeral — not persisted.
+   * For terminal content: Claude (in this terminal) finished its turn or is
+   * awaiting input while this tab wasn't being viewed. Shown as a dot on the tab
+   * and cleared when viewed. Ephemeral — not persisted.
    */
   attention?: boolean;
-  /** For terminal tabs: the split layout tree. */
-  paneTree?: PaneNode;
-  /** For terminal tabs: the focused terminal pane. */
-  activePaneId?: string;
   /**
-   * For terminal tabs: a command to run once in a pane when it first spawns,
-   * keyed by pane id (e.g. a "Claude" tab runs `claude`). Only the pane(s)
-   * present at creation get a command; panes added later by splitting don't.
+   * For terminal content: a command to run once when the terminal first spawns
+   * (e.g. a "Claude" tab runs `claude`). Persisted so a restored terminal
+   * re-runs it when its PTY respawns.
    */
-  initialCommands?: Record<string, string>;
-  /** For browser tabs: the current URL (persisted so it restores on launch). */
+  initialCommand?: string;
+  /** For browser content: the current URL (persisted so it restores on launch). */
   url?: string;
 }
 
@@ -55,8 +81,10 @@ export interface ProjectTab {
   paths: string[];
   loading: boolean;
   error?: string;
-  /** Tabs open in the main panel (terminals + files). */
-  mainTabs: MainTab[];
-  /** Active main-panel tab, or null when none are open (empty state). */
-  activeMainTabId: string | null;
+  /** Every open content unit in this project, keyed by content id. */
+  contents: Record<string, ContentItem>;
+  /** The split layout, or null when nothing is open (empty state). */
+  root: PaneNode | null;
+  /** The focused pane (leaf id), or null when nothing is open. */
+  activePaneId: string | null;
 }
