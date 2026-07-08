@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { SquareSplitHorizontal } from "lucide-react";
 
 import { monaco } from "@/lib/monaco";
 import { registerModelFile, unregisterModelFile } from "@/lib/format";
@@ -6,9 +9,13 @@ import { lspManager } from "@/lib/lsp/manager";
 import { registerLspProviders, registerOpenFileHandler } from "@/lib/lsp/monacoBridge";
 import { onProjectFilesChange, readFileText, writeFileText } from "@/lib/tauri";
 import { useSettings } from "@/lib/settings";
+import { cn } from "@/lib/utils";
 
 /** Files the TypeScript/JavaScript language server handles. */
 const LSP_FILE = /\.(tsx?|jsx?|mts|cts|mjs|cjs)$/;
+
+/** Files the Markdown preview can render. */
+const MARKDOWN_FILE = /\.(md|markdown)$/i;
 
 /**
  * A single Monaco editor instance shared across all open file tabs of a
@@ -22,6 +29,7 @@ export function EditorPanel({
   activeRelPath,
   onDirtyChange,
   onOpenFile,
+  onOpenUrl,
 }: {
   root: string;
   openRelPaths: string[];
@@ -29,8 +37,23 @@ export function EditorPanel({
   onDirtyChange?: (relPath: string, dirty: boolean) => void;
   /** Open another file in this project (used for cross-file go-to-definition). */
   onOpenFile?: (relPath: string) => void;
+  /** Open a web URL in an in-app browser tab (Markdown preview links). */
+  onOpenUrl?: (url: string) => void;
 }) {
-  const { showMinimap, formatOnSave, editorTheme, lspEnabled } = useSettings();
+  const { showMinimap, formatOnSave, editorTheme, lspEnabled, markdownPreviewOnly } =
+    useSettings();
+  // Markdown preview: a side-by-side pane rendering the active file's live text.
+  // `showPreview` is a session-wide toggle; the pane only appears for Markdown.
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewText, setPreviewText] = useState("");
+  const isMarkdown = !!activeRelPath && MARKDOWN_FILE.test(activeRelPath);
+  // When "Markdown preview only" is on, Markdown files render as preview alone —
+  // no editor, no split toggle. Otherwise the split toggle drives an optional
+  // side-by-side preview next to the editor.
+  const previewOnly = isMarkdown && markdownPreviewOnly;
+  const showToggle = isMarkdown && !markdownPreviewOnly;
+  const splitPreview = showToggle && showPreview;
+  const previewVisible = previewOnly || splitPreview;
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map());
@@ -235,6 +258,27 @@ export function EditorPanel({
     editorRef.current?.updateOptions({ theme: editorTheme });
   }, [editorTheme]);
 
+  // Keep the preview in sync with the active model's live content while the
+  // preview is showing for a Markdown file. Rebinds on model swap (tab change),
+  // which may complete after this effect runs since the swap is async.
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !previewVisible) return;
+    let contentSub: monaco.IDisposable | undefined;
+    const bind = () => {
+      contentSub?.dispose();
+      const model = editor.getModel();
+      setPreviewText(model ? model.getValue() : "");
+      contentSub = model?.onDidChangeContent(() => setPreviewText(model.getValue()));
+    };
+    bind();
+    const modelSub = editor.onDidChangeModel(bind);
+    return () => {
+      modelSub.dispose();
+      contentSub?.dispose();
+    };
+  }, [previewVisible, activeRelPath]);
+
   // Swap to the active file.
   useEffect(() => {
     const editor = editorRef.current;
@@ -353,5 +397,70 @@ export function EditorPanel({
     }
   }, [openRelPaths]);
 
-  return <div ref={containerRef} className="h-full w-full" />;
+  return (
+    <div className="flex h-full w-full flex-col">
+      {showToggle && (
+        <div className="flex h-9 shrink-0 items-center justify-end border-b border-border-subtle px-2">
+          <button
+            type="button"
+            onClick={() => setShowPreview((v) => !v)}
+            title={showPreview ? "Hide preview" : "Show preview (split)"}
+            aria-label={showPreview ? "Hide preview" : "Show preview"}
+            aria-pressed={showPreview}
+            className={cn(
+              "flex h-7 w-7 items-center justify-center rounded-md transition-colors",
+              showPreview
+                ? "bg-bg-elevated text-fg"
+                : "text-fg-faint hover:bg-bg-hover hover:text-fg",
+            )}
+          >
+            <SquareSplitHorizontal size={15} strokeWidth={1.8} />
+          </button>
+        </div>
+      )}
+      <div className="flex min-h-0 flex-1">
+        {/* The single Monaco container — always mounted, never re-created; just
+            hidden in preview-only mode so the editor instance survives. */}
+        <div
+          ref={containerRef}
+          className={cn(
+            "min-h-0 min-w-0 flex-1",
+            previewOnly && "hidden",
+            splitPreview && "border-r border-border-subtle",
+          )}
+        />
+        {previewVisible && (
+          <div className="min-h-0 min-w-0 flex-1 overflow-auto px-6 py-4">
+            {previewText.trim() ? (
+              <div className="md">
+                <Markdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    a({ href, children }) {
+                      return (
+                        <a
+                          href={href}
+                          onClick={(e) => {
+                            // Never let a link navigate the app window itself.
+                            e.preventDefault();
+                            if (href && /^https?:\/\//i.test(href)) onOpenUrl?.(href);
+                          }}
+                        >
+                          {children}
+                        </a>
+                      );
+                    },
+                  }}
+                >
+                  {previewText}
+                </Markdown>
+              </div>
+            ) : (
+              <p className="text-[13px] text-fg-faint">Nothing to preview yet.</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

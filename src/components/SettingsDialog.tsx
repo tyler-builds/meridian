@@ -360,6 +360,8 @@ function EditorSection() {
     setEditorTheme,
     lspEnabled,
     setLspEnabled,
+    markdownPreviewOnly,
+    setMarkdownPreviewOnly,
   } = useSettings();
   return (
     <>
@@ -397,6 +399,15 @@ function EditorSection() {
         description="Project-wide types, errors, and IntelliSense for TypeScript/JavaScript (uses the project's own typescript-language-server when available)."
       >
         <Switch checked={lspEnabled} onCheckedChange={setLspEnabled} />
+      </SettingRow>
+      <SettingRow
+        title="Markdown preview only"
+        description="Open Markdown files as a rendered preview instead of the editor. Hides the editor and the split-preview toggle."
+      >
+        <Switch
+          checked={markdownPreviewOnly}
+          onCheckedChange={setMarkdownPreviewOnly}
+        />
       </SettingRow>
     </>
   );

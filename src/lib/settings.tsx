@@ -39,6 +39,13 @@ interface SettingsContextValue {
   /** Code editor: enable the TypeScript/JavaScript language server. */
   lspEnabled: boolean;
   setLspEnabled: (value: boolean) => void;
+  /**
+   * Code editor: open Markdown files as a rendered preview only (no editor,
+   * no split toggle). Off by default — the editor with an optional split
+   * preview is the normal mode.
+   */
+  markdownPreviewOnly: boolean;
+  setMarkdownPreviewOnly: (value: boolean) => void;
   /** Run the `claude` command with --dangerously-skip-permissions. */
   dangerouslySkipPermissions: boolean;
   setDangerouslySkipPermissions: (value: boolean) => void;
@@ -109,6 +116,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // On by default — provides project-wide types, diagnostics, and IntelliSense.
   const [lspEnabled, setLspEnabledState] = useState<boolean>(
     () => persist.getItem("meridian.lspEnabled") !== "0",
+  );
+  // Off by default — Markdown files open in the editor (with an optional split
+  // preview); this makes them open as a rendered preview only.
+  const [markdownPreviewOnly, setMarkdownPreviewOnlyState] = useState<boolean>(
+    () => persist.getItem("meridian.markdownPreviewOnly") === "1",
   );
   // Off by default — this bypasses Claude's permission prompts.
   const [dangerouslySkipPermissions, setDangerSkipState] = useState<boolean>(
@@ -230,6 +242,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setLspEnabledState(value);
   };
 
+  const setMarkdownPreviewOnly = (value: boolean) => {
+    persist.setItem("meridian.markdownPreviewOnly", value ? "1" : "0");
+    setMarkdownPreviewOnlyState(value);
+  };
+
   const setDangerouslySkipPermissions = (value: boolean) => {
     persist.setItem(
       "meridian.dangerouslySkipPermissions",
@@ -301,6 +318,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setEditorTheme,
         lspEnabled,
         setLspEnabled,
+        markdownPreviewOnly,
+        setMarkdownPreviewOnly,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
         claudePath,

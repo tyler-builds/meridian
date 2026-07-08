@@ -426,6 +426,7 @@ export function ProjectView({
                       onFileDirtyChange(tab.id, rel, dirty)
                     }
                     onOpenFile={(rel) => onOpenFile(tab.id, rel)}
+                    onOpenUrl={(url) => onOpenBrowserUrl(tab.id, url)}
                   />
                 </div>
               )}
