@@ -29,6 +29,7 @@ import {
   splitLeaf,
 } from "@/lib/paneTree";
 import { TabBar } from "@/components/TabBar";
+import { ProjectRail } from "@/components/ProjectRail";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ProjectView } from "@/components/ProjectView";
@@ -53,6 +54,7 @@ export default function App() {
     browserMcpEvalJs,
     effectiveClaudePath,
     shellProgram,
+    verticalProjectTabs,
   } = useSettings();
   const [tabs, setTabs] = useState<ProjectTab[]>([]);
   // Live mirror of `tabs` so callbacks can read the current project list without
@@ -914,23 +916,43 @@ export default function App() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-bg text-fg">
-      <TabBar
-        tabs={tabs}
-        activeTabId={activeTabId}
-        onSelect={setActiveTabId}
-        onClose={closeTab}
-        onReorder={reorderProjects}
-        onOpenProject={openProject}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
+      {/* Horizontal mode always shows the title-bar strip. Vertical mode moves
+          the tabs to the rail and the chrome (Settings + window controls) into
+          the active project's tab row — except with no project open, where
+          there's no such row, so fall back to the strip to keep the window
+          controls reachable. */}
+      {(!verticalProjectTabs || tabs.length === 0) && (
+        <TabBar
+          tabs={tabs}
+          activeTabId={activeTabId}
+          onSelect={setActiveTabId}
+          onClose={closeTab}
+          onReorder={reorderProjects}
+          onOpenProject={openProject}
+          onOpenSettings={() => setSettingsOpen(true)}
+          showProjectTabs={!verticalProjectTabs}
+        />
+      )}
 
-      <div className="relative flex min-h-0 flex-1">
-        {tabs.length === 0 ? (
-          <EmptyState onOpenProject={openProject} />
-        ) : (
-          // Keep every tab mounted so its terminal/PTY survives tab switches;
-          // hide inactive ones rather than unmounting.
-          tabs.map((tab) => (
+      <div className="flex min-h-0 flex-1">
+        {verticalProjectTabs && tabs.length > 0 && (
+          <ProjectRail
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onSelect={setActiveTabId}
+            onClose={closeTab}
+            onReorder={reorderProjects}
+            onOpenProject={openProject}
+          />
+        )}
+
+        <div className="relative flex min-h-0 flex-1">
+          {tabs.length === 0 ? (
+            <EmptyState onOpenProject={openProject} />
+          ) : (
+            // Keep every tab mounted so its terminal/PTY survives tab switches;
+            // hide inactive ones rather than unmounting.
+            tabs.map((tab) => (
             <div
               key={tab.id}
               className={cn(
@@ -945,6 +967,8 @@ export default function App() {
                 <ProjectView
                   tab={tab}
                   active={tab.id === activeTabId}
+                  verticalProjectTabs={verticalProjectTabs}
+                  onOpenSettings={() => setSettingsOpen(true)}
                   sidebarWidth={sidebarWidth}
                   sidebarCollapsed={sidebarCollapsed}
                   onToggleSidebar={toggleSidebar}
@@ -973,8 +997,9 @@ export default function App() {
                 />
               </ErrorBoundary>
             </div>
-          ))
-        )}
+            ))
+          )}
+        </div>
       </div>
 
       {(() => {

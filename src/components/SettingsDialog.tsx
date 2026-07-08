@@ -6,6 +6,7 @@ import {
   FolderOpen,
   GitCompare,
   Info,
+  LayoutTemplate,
   Loader2,
   Search,
   Terminal,
@@ -36,13 +37,20 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-type SectionId = "terminal" | "editor" | "diff" | "connections" | "about";
+type SectionId =
+  | "appearance"
+  | "terminal"
+  | "editor"
+  | "diff"
+  | "connections"
+  | "about";
 
 const SECTIONS: {
   id: SectionId;
   label: string;
   icon: LucideIcon;
 }[] = [
+  { id: "appearance", label: "Appearance", icon: LayoutTemplate },
   { id: "terminal", label: "Terminal", icon: Terminal },
   { id: "editor", label: "Code Editor", icon: Code2 },
   { id: "diff", label: "Diff Viewer", icon: GitCompare },
@@ -51,7 +59,7 @@ const SECTIONS: {
 ];
 
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
-  const [section, setSection] = useState<SectionId>("terminal");
+  const [section, setSection] = useState<SectionId>("appearance");
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -107,7 +115,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
           {/* Section content */}
           <div className="min-w-0 flex-1 overflow-y-auto p-5">
-            {section === "terminal" ? (
+            {section === "appearance" ? (
+              <AppearanceSection />
+            ) : section === "terminal" ? (
               <TerminalSection />
             ) : section === "editor" ? (
               <EditorSection />
@@ -275,6 +285,23 @@ function ClaudeBinaryRow() {
         <div className="max-w-[244px] truncate text-[11px]">{hint}</div>
       </div>
     </SettingRow>
+  );
+}
+
+function AppearanceSection() {
+  const { verticalProjectTabs, setVerticalProjectTabs } = useSettings();
+  return (
+    <>
+      <SettingRow
+        title="Vertical project tabs"
+        description="Show project tabs as a vertical list down the left edge instead of a horizontal strip in the title bar. The file tree sidebar stays collapsible beside it."
+      >
+        <Switch
+          checked={verticalProjectTabs}
+          onCheckedChange={setVerticalProjectTabs}
+        />
+      </SettingRow>
+    </>
   );
 }
 

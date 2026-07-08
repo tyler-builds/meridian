@@ -159,6 +159,7 @@ export function MainTabBar({
   onNewGit,
   onNewNotes,
   onNewSearch,
+  grow = true,
 }: {
   tabs: MainTab[];
   activeId: string | null;
@@ -171,6 +172,12 @@ export function MainTabBar({
   onNewGit: () => void;
   onNewNotes: () => void;
   onNewSearch: () => void;
+  /**
+   * Fill the available width (default). Set false when a sibling drag-region
+   * spacer should take the slack instead — then this only shrinks and scrolls,
+   * so the row's free space stays draggable (vertical-tabs mode).
+   */
+  grow?: boolean;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
@@ -184,7 +191,12 @@ export function MainTabBar({
   };
 
   return (
-    <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+    <div
+      className={cn(
+        "no-scrollbar flex min-w-0 items-center gap-1 overflow-x-auto",
+        grow && "flex-1",
+      )}
+    >
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}

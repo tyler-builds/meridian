@@ -23,7 +23,7 @@ import { WindowControls } from "@/components/WindowControls";
  * Right-click menu for a project tab. Cursor-anchored, grows downward (the tab
  * bar is at the top of the window). Closes on outside click or Escape.
  */
-function TabContextMenu({
+export function TabContextMenu({
   x,
   y,
   onCopyPath,
@@ -167,6 +167,7 @@ export function TabBar({
   onReorder,
   onOpenProject,
   onOpenSettings,
+  showProjectTabs = true,
 }: {
   tabs: ProjectTab[];
   activeTabId: string | null;
@@ -175,6 +176,12 @@ export function TabBar({
   onReorder: (fromId: string, toId: string) => void;
   onOpenProject: () => void;
   onOpenSettings: () => void;
+  /**
+   * Render the project tabs (and the new-project button) in the strip. When
+   * false, they live in the vertical rail instead, so the strip is just an
+   * empty drag region holding Settings and the window controls.
+   */
+  showProjectTabs?: boolean;
 }) {
   // A small distance threshold so a plain click still selects/closes a tab
   // rather than starting a drag.
@@ -216,39 +223,43 @@ export function TabBar({
         isMac ? "pl-[78px]" : "pl-2",
       )}
     >
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={onDragEnd}
-      >
-        <SortableContext
-          items={tabs.map((t) => t.id)}
-          strategy={horizontalListSortingStrategy}
-        >
-          <div className="no-scrollbar flex h-full min-w-0 items-center gap-1 overflow-x-auto">
-            {tabs.map((tab) => (
-              <ProjectTabItem
-                key={tab.id}
-                tab={tab}
-                active={tab.id === activeTabId}
-                onSelect={onSelect}
-                onClose={onClose}
-                onContextMenu={onContextMenu}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      </DndContext>
+      {showProjectTabs && (
+        <>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={onDragEnd}
+          >
+            <SortableContext
+              items={tabs.map((t) => t.id)}
+              strategy={horizontalListSortingStrategy}
+            >
+              <div className="no-scrollbar flex h-full min-w-0 items-center gap-1 overflow-x-auto">
+                {tabs.map((tab) => (
+                  <ProjectTabItem
+                    key={tab.id}
+                    tab={tab}
+                    active={tab.id === activeTabId}
+                    onSelect={onSelect}
+                    onClose={onClose}
+                    onContextMenu={onContextMenu}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
 
-      {/* New tab sits right next to the last tab. */}
-      <button
-        onClick={onOpenProject}
-        className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
-        aria-label="Open project"
-        title="Open project"
-      >
-        <Plus size={16} strokeWidth={2} />
-      </button>
+          {/* New tab sits right next to the last tab. */}
+          <button
+            onClick={onOpenProject}
+            className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+            aria-label="Open project"
+            title="Open project"
+          >
+            <Plus size={16} strokeWidth={2} />
+          </button>
+        </>
+      )}
 
       {/* Draggable spacer fills the gap between controls. */}
       <div data-tauri-drag-region className="h-full min-w-2 flex-1" />

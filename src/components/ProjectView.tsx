@@ -2,6 +2,7 @@ import { useCallback, type MouseEvent as ReactMouseEvent } from "react";
 import {
   MoreHorizontal,
   PanelLeft,
+  Settings,
   SplitSquareHorizontal,
   SplitSquareVertical,
   X,
@@ -10,7 +11,8 @@ import {
 import type { ProjectTab } from "@/types";
 import type { PickedElement } from "@/lib/tauri";
 import { useSettings } from "@/lib/settings";
-import { cn } from "@/lib/utils";
+import { cn, isMac } from "@/lib/utils";
+import { WindowControls } from "@/components/WindowControls";
 import { FileTreePanel } from "@/components/FileTreePanel";
 import { TerminalSplit } from "@/components/TerminalSplit";
 import { EditorPanel } from "@/components/EditorPanel";
@@ -31,6 +33,8 @@ import {
 export function ProjectView({
   tab,
   active,
+  verticalProjectTabs,
+  onOpenSettings,
   sidebarWidth,
   sidebarCollapsed,
   onToggleSidebar,
@@ -60,6 +64,12 @@ export function ProjectView({
   tab: ProjectTab;
   /** Whether this project tab is the active one (drives native webview show). */
   active: boolean;
+  /**
+   * Vertical-tabs mode: the title-bar strip is gone, so this project's tab row
+   * hosts the window chrome (Settings + min/max/close) and a draggable spacer.
+   */
+  verticalProjectTabs: boolean;
+  onOpenSettings: () => void;
   sidebarWidth: number;
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
@@ -190,7 +200,14 @@ export function ProjectView({
 
       {/* Main panel: tabbed terminals + editor */}
       <main className="flex min-w-0 flex-1 flex-col bg-bg">
-        <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border-subtle px-2">
+        <div
+          className={cn(
+            "flex h-10 shrink-0 items-center gap-1.5 border-b border-border-subtle",
+            // Vertical-tabs mode hosts the window controls here, flush to the
+            // right window edge (no right padding).
+            verticalProjectTabs ? "pl-2 pr-0" : "px-2",
+          )}
+        >
           {sidebarCollapsed && (
             <button
               onClick={onToggleSidebar}
@@ -213,7 +230,14 @@ export function ProjectView({
             onNewGit={() => onNewGit(tab.id)}
             onNewNotes={() => onNewNotes(tab.id)}
             onNewSearch={() => onNewSearch(tab.id)}
+            grow={!verticalProjectTabs}
           />
+
+          {/* Draggable spacer takes the slack (window drag region), since the
+              title-bar strip that normally provides it is hidden. */}
+          {verticalProjectTabs && (
+            <div data-tauri-drag-region className="h-full min-w-2 flex-1" />
+          )}
 
           {activeTerminal && (
             <DropdownMenu>
@@ -268,6 +292,23 @@ export function ProjectView({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+          )}
+
+          {/* Window chrome, moved out of the (hidden) title-bar strip. Only the
+              active project renders it, so there's a single set of controls /
+              one window-state listener. */}
+          {verticalProjectTabs && active && (
+            <div className="flex h-full shrink-0 items-stretch">
+              <button
+                onClick={onOpenSettings}
+                className="mx-1 flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
+                aria-label="Settings"
+                title="Settings"
+              >
+                <Settings size={16} strokeWidth={1.8} />
+              </button>
+              {!isMac && <WindowControls />}
+            </div>
           )}
         </div>
 

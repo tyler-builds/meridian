@@ -73,6 +73,12 @@ interface SettingsContextValue {
    */
   browserMcpEvalJs: boolean;
   setBrowserMcpEvalJs: (value: boolean) => void;
+  /**
+   * Show project tabs as a vertical list on the far-left edge instead of a
+   * horizontal strip in the title bar. Off by default (horizontal strip).
+   */
+  verticalProjectTabs: boolean;
+  setVerticalProjectTabs: (value: boolean) => void;
   /** Diff view: stacked (unified) vs side-by-side (split). */
   diffStyle: "unified" | "split";
   setDiffStyle: (value: "unified" | "split") => void;
@@ -141,6 +147,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // Off by default — arbitrary JS execution in a page is the most dangerous tool.
   const [browserMcpEvalJs, setBrowserMcpEvalJsState] = useState<boolean>(
     () => persist.getItem("meridian.browserMcpEvalJs") === "1",
+  );
+  // Off by default — project tabs live in a horizontal strip in the title bar.
+  const [verticalProjectTabs, setVerticalProjectTabsState] = useState<boolean>(
+    () => persist.getItem("meridian.verticalProjectTabs") === "1",
   );
   // Diff view preferences (default: unified, no wrap, show whitespace).
   const [diffStyle, setDiffStyleState] = useState<"unified" | "split">(() =>
@@ -265,6 +275,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setBrowserMcpEvalJsState(value);
   };
 
+  const setVerticalProjectTabs = (value: boolean) => {
+    persist.setItem("meridian.verticalProjectTabs", value ? "1" : "0");
+    setVerticalProjectTabsState(value);
+  };
+
   const setDiffStyle = (value: "unified" | "split") => {
     persist.setItem("meridian.diffStyle", value);
     setDiffStyleState(value);
@@ -320,6 +335,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setLspEnabled,
         markdownPreviewOnly,
         setMarkdownPreviewOnly,
+        verticalProjectTabs,
+        setVerticalProjectTabs,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
         claudePath,
