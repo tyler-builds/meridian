@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, Url};
+use tauri::{AppHandle, Emitter, Manager, Url};
 
 use crate::{
     browser_do_history, browser_do_navigate, browser_do_reload, browser_eval_with_result,
@@ -182,15 +182,18 @@ fn respond_empty(request: tiny_http::Request, status: u16) {
 }
 
 fn handle_request(app: AppHandle, secret: &str, mut request: tiny_http::Request) {
-    // Only POST to the JSON-RPC endpoint is supported; we don't offer the
-    // optional server→client SSE stream, so GET (and everything else) is 405.
+    // Only POST is supported (both the JSON-RPC endpoint and the /attention hook
+    // callback POST); we don't offer the optional server→client SSE stream, so
+    // GET (and everything else) is 405.
     if request.method() != &tiny_http::Method::Post {
         respond_empty(request, 405);
         return;
     }
 
-    // Bearer-secret gate. The secret is the security boundary (browser tools are
-    // auto-allowed), so reject anything without the exact token.
+    // Bearer-secret gate, shared by the MCP endpoint and the /attention callback.
+    // The secret is the security boundary (browser tools are auto-allowed, and
+    // /attention drives system notifications), so reject anything without the
+    // exact token before doing any work.
     let authorized = header_value(&request, "Authorization")
         .map(|v| v.trim() == format!("Bearer {secret}"))
         .unwrap_or(false);
@@ -199,6 +202,20 @@ fn handle_request(app: AppHandle, secret: &str, mut request: tiny_http::Request)
         return;
     }
 
+    // Route on the path (tiny_http gives path+query, e.g. "/attention?tab=..").
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or("");
+
+    // Claude Code hook callback: a Stop/Notification hook registered by
+    // `claude_hooks_config` (see lib.rs) POSTs here so the app can flag the tab's
+    // attention dot and, when the window is unfocused, raise a notification.
+    if path == "/attention" {
+        handle_attention(&app, &url);
+        respond_empty(request, 204);
+        return;
+    }
+
+    // --- MCP endpoint (the @browser feature) ---
     let (root, eval_enabled) = parse_query(request.url());
     let Some(root) = root else {
         respond_json(
@@ -253,6 +270,29 @@ fn handle_request(app: AppHandle, secret: &str, mut request: tiny_http::Request)
     };
 
     respond_json(request, 200, out.to_string());
+}
+
+/// Handle a Claude Code hook callback carrying `?tab=<content id>&event=<name>`
+/// (event is `stop` or `notification`). Emits `claude://attention` so the
+/// frontend can flag the tab and decide whether to raise a system notification.
+/// Best-effort: a malformed URL or missing tab id is silently ignored (the hook
+/// is a side-effect channel — nothing depends on its response).
+fn handle_attention(app: &AppHandle, url: &str) {
+    let Ok(parsed) = Url::parse(&format!("http://localhost{url}")) else {
+        return;
+    };
+    let mut tab = None;
+    let mut event = None;
+    for (k, v) in parsed.query_pairs() {
+        match k.as_ref() {
+            "tab" => tab = Some(v.into_owned()),
+            "event" => event = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    let Some(tab) = tab else { return };
+    let event = event.unwrap_or_else(|| "stop".to_string());
+    let _ = app.emit("claude://attention", json!({ "tab": tab, "event": event }));
 }
 
 // --- JSON-RPC dispatch ---

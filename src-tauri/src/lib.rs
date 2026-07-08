@@ -2839,6 +2839,80 @@ fn claude_browser_mcp_config(
     Ok(denormalize(&file))
 }
 
+/// Write (or rewrite) a Claude Code `--settings` file registering `Stop` and
+/// `Notification` hooks that POST to the in-process server's `/attention` route,
+/// and return its absolute path. This is the authoritative "Claude finished /
+/// needs you" signal, replacing the fragile terminal-title heuristic (which
+/// stays as a fallback for a hand-launched `claude`).
+///
+/// The endpoint (port, secret) and the tab id are baked into an *exec-form*
+/// `curl` invocation (`command` + `args`, no shell). That deliberately avoids
+/// both environment-variable expansion and shell quoting, sidestepping
+/// cross-platform shell differences — notably PowerShell aliasing `curl` to
+/// `Invoke-WebRequest`, which takes entirely different flags. The absolute curl
+/// path (resolved via `which`) also avoids PATH surprises at hook time.
+///
+/// The file is stable per tab id (named by a hash) so a Claude tab restored from
+/// saved state — which re-runs its persisted launch command — keeps pointing at
+/// a valid settings file, exactly like `claude_browser_mcp_config`. Errors (MCP
+/// server down, no `curl`) let the caller launch `claude` without hooks.
+#[tauri::command]
+fn claude_hooks_config(
+    app: AppHandle,
+    mcp: State<mcp::McpState>,
+    tab_id: String,
+) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+
+    let curl = which::which("curl")
+        .map_err(|_| "curl not found on PATH".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("mcp");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tab_id.hash(&mut hasher);
+    let file = dir.join(format!("hooks-{:016x}.json", hasher.finish()));
+
+    // One exec-form command object per event. The secret gates the callback (the
+    // same boundary as the MCP endpoint); `--max-time` keeps a hung request from
+    // holding a hook slot; `-s` silences curl so its stdout can't corrupt any
+    // hook JSON parsing.
+    let auth = format!("Authorization: Bearer {}", mcp.secret);
+    let cmd_obj = |event: &str| {
+        let url = format!(
+            "http://127.0.0.1:{}/attention?tab={}&event={}",
+            mcp.port,
+            url_query_encode(&tab_id),
+            event
+        );
+        serde_json::json!({
+            "type": "command",
+            "command": curl.clone(),
+            "args": ["-s", "--max-time", "5", "-X", "POST", "-H", auth.clone(), url]
+        })
+    };
+
+    // `Stop` fires on every turn completion (no matcher). `Notification` fires on
+    // permission prompts, idle-input prompts, etc.; an empty matcher takes all of
+    // them — these are precisely the "Claude needs you" moments the title
+    // heuristic missed.
+    let config = serde_json::json!({
+        "hooks": {
+            "Stop": [ { "hooks": [ cmd_obj("stop") ] } ],
+            "Notification": [ { "matcher": "", "hooks": [ cmd_obj("notification") ] } ]
+        }
+    });
+    std::fs::write(&file, config.to_string()).map_err(|e| e.to_string())?;
+    Ok(denormalize(&file))
+}
+
 /// One rate-limit window's state as reported by the Claude usage endpoint.
 #[derive(serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -3567,6 +3641,7 @@ pub fn run() {
         browser_pick_stop,
         browser_pick_toast,
         claude_browser_mcp_config,
+        claude_hooks_config,
         claude_usage,
         resource_stats,
         frontend_log,
@@ -3597,6 +3672,7 @@ pub fn run() {
         // updater JS API; `process` provides the relaunch after install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(PtyManager::default())
         .manage(ResolvedEnv::default())
         .manage(TreeWatcherManager::default())

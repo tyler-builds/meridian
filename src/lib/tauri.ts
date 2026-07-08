@@ -656,6 +656,32 @@ export function claudeBrowserMcpConfig(
   return invoke<string>("claude_browser_mcp_config", { projectRoot, evalJs });
 }
 
+/**
+ * Write (or rewrite) the Claude Code `--settings` file that registers Meridian's
+ * Stop/Notification hooks for the Claude tab `tabId`, and resolve with its
+ * absolute path. Pass it to `claude --settings <path>`; it merges with (never
+ * replaces) the user's own settings/hooks. The hooks POST to the localhost
+ * server's `/attention` route, which is the authoritative "Claude finished / needs
+ * you" signal. Rejects if the MCP server isn't running or `curl` isn't found — the
+ * caller then launches `claude` without hooks (the title heuristic still applies).
+ */
+export function claudeHooksConfig(tabId: string): Promise<string> {
+  return invoke<string>("claude_hooks_config", { tabId });
+}
+
+/**
+ * Fired when a Claude tab's Stop/Notification hook calls back: `tab` is the
+ * content id, `event` is `"stop"` (turn finished) or `"notification"` (permission/
+ * input prompt — Claude needs you). One global event for all projects.
+ */
+export function onClaudeAttentionEvent(
+  cb: (payload: { tab: string; event: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ tab: string; event: string }>("claude://attention", (e) =>
+    cb(e.payload),
+  );
+}
+
 export function browserNavigate(id: string, url: string): Promise<void> {
   return invoke("browser_navigate", { id, url });
 }

@@ -14,10 +14,13 @@
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-is-maximized",
+    "core:window:allow-is-focused",
+    "core:window:allow-request-user-attention",
     "dialog:default",
     "dialog:allow-open",
     "window-state:default",
     "updater:default",
-    "process:default"
+    "process:default",
+    "notification:default"
   ]
 }

@@ -3,8 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ContentItem, ProjectTab } from "@/types";
 import {
   claudeBrowserMcpConfig,
+  claudeHooksConfig,
   findProjectFavicon,
   frontendLog,
+  onClaudeAttentionEvent,
   onProjectTreeChange,
   pickProjectFolder,
   readProjectTree,
@@ -14,7 +16,9 @@ import {
 } from "@/lib/tauri";
 import { bracketedPaste, injectIntoTerminal } from "@/lib/terminalRegistry";
 import { claudeBaseCommand, isClaudeCommand } from "@/lib/claude";
+import { ensureNotificationPermission, notifyAttention } from "@/lib/notify";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { loadSession, saveSession } from "@/lib/session";
 import { setObstruction } from "@/lib/nativeSurface";
 import { useSettings } from "@/lib/settings";
@@ -229,6 +233,20 @@ export default function App() {
             `@browser: MCP config generation failed, launching plain claude: ${String(e)}`,
           );
         }
+      }
+
+      // Register the Stop/Notification hooks that authoritatively flag this tab
+      // when Claude finishes a turn or needs input (see claude_hooks_config). It
+      // merges with the user's own settings; on failure we launch without hooks
+      // and fall back to the terminal-title heuristic in TerminalPanel.
+      try {
+        const hooksPath = await claudeHooksConfig(id);
+        command += ` --settings "${hooksPath}"`;
+      } catch (e) {
+        void frontendLog(
+          "warn",
+          `Claude attention hooks unavailable, using title heuristic: ${String(e)}`,
+        );
       }
 
       updateProject(projectId, (t) =>
@@ -456,34 +474,105 @@ export default function App() {
     [updateProject],
   );
 
-  // Claude (in `contentId` of `projectId`) finished its turn / awaits input.
-  // Flag it unless it's visible in the active project (nothing to alert).
-  const activeTabIdRef = useRef(activeTabId);
-  activeTabIdRef.current = activeTabId;
-  const claudeAttention = useCallback((projectId: string, contentId: string) => {
-    setTabs((prev) =>
-      prev.map((t) => {
-        if (t.id !== projectId) return t;
-        const visible = t.root ? visibleContentIds(t.root) : [];
-        const viewed =
-          projectId === activeTabIdRef.current && visible.includes(contentId);
-        const c = t.contents[contentId];
-        if (viewed || !c || c.attention) return t;
-        return {
-          ...t,
-          contents: { ...t.contents, [contentId]: { ...c, attention: true } },
-        };
-      }),
-    );
+  // Whether Meridian's window is focused. A tab only counts as "viewed" (no
+  // attention needed) when it's visible AND the window is focused; when the app
+  // is in the background, even the active tab warrants a system notification.
+  const [windowFocused, setWindowFocused] = useState(true);
+  const windowFocusedRef = useRef(windowFocused);
+  windowFocusedRef.current = windowFocused;
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    const w = getCurrentWindow();
+    void w.isFocused().then(setWindowFocused).catch(() => {});
+    w.onFocusChanged(({ payload }) => setWindowFocused(payload))
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
   }, []);
 
-  // Viewing a content clears its attention dot. Clears every currently-visible
-  // content of the active project (splits can show several at once).
+  // Ask for notification permission once at startup, while the window is focused
+  // and the user is present. Otherwise the first (macOS) permission prompt would
+  // appear only when a notification fires — which is always while the window is
+  // unfocused — so the user would miss both the prompt and that first alert.
+  // No-ops after the grant is cached (see ensureNotificationPermission).
+  useEffect(() => {
+    void ensureNotificationPermission();
+  }, []);
+
+  // Content ids we've already raised a system notification for this "episode"
+  // (i.e. since the tab was last viewed). Prevents a duplicate toast when both
+  // the Stop hook and the fallback title heuristic fire, and when several
+  // notifications arrive before the user looks. Cleared on view (below).
+  const notifiedRef = useRef<Set<string>>(new Set());
+
+  // Claude (in `contentId` of `projectId`) finished its turn (`event: "stop"`)
+  // or needs input (`event: "notification"`). Flags the tab's attention dot
+  // unless it's currently viewed, and raises a system notification when the
+  // window is unfocused. Driven by the Claude Code hooks (authoritative) and, as
+  // a fallback, the terminal-title heuristic in TerminalPanel.
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
+  const claudeAttention = useCallback(
+    (projectId: string, contentId: string, event?: string) => {
+      const t = tabsRef.current.find((x) => x.id === projectId);
+      const c = t?.contents[contentId];
+      if (!t || !c) return;
+      const visible = t.root ? visibleContentIds(t.root) : [];
+      const onScreen =
+        projectId === activeTabIdRef.current && visible.includes(contentId);
+      // Fully "viewed" (visible + focused) → nothing to signal at all.
+      if (onScreen && windowFocusedRef.current) return;
+
+      // Attention dot: pointless on the visible tab, useful everywhere else.
+      if (!onScreen && !c.attention) {
+        setTabs((prev) =>
+          prev.map((x) =>
+            x.id === projectId
+              ? {
+                  ...x,
+                  contents: {
+                    ...x.contents,
+                    [contentId]: { ...x.contents[contentId], attention: true },
+                  },
+                }
+              : x,
+          ),
+        );
+      }
+
+      // System notification only when the window is unfocused, at most once per
+      // episode (see notifiedRef).
+      if (!windowFocusedRef.current && !notifiedRef.current.has(contentId)) {
+        notifiedRef.current.add(contentId);
+        const what =
+          event === "notification" ? "needs your input" : "finished its turn";
+        void notifyAttention(`Claude ${what}`, t.name);
+      }
+    },
+    [],
+  );
+
+  // A Claude hook fired: map the content id to its project and flag attention.
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    onClaudeAttentionEvent(({ tab, event }) => {
+      const project = tabsRef.current.find((t) => tab in t.contents);
+      if (project) claudeAttention(project.id, tab, event);
+    })
+      .then((u) => (unlisten = u))
+      .catch(() => {});
+    return () => unlisten?.();
+  }, [claudeAttention]);
+
+  // Viewing a content clears its attention dot and notification record. A tab
+  // only counts as viewed while the window is focused, so returning to the app
+  // (refocus) re-arms notifications for its visible tabs. Clears every currently-
+  // visible content of the active project (splits can show several at once).
   const activeProject = tabs.find((t) => t.id === activeTabId);
   const visibleKey =
     activeProject?.root ? visibleContentIds(activeProject.root).join(",") : "";
   useEffect(() => {
-    if (activeTabId == null) return;
+    if (activeTabId == null || !windowFocused) return;
     setTabs((prev) =>
       prev.map((t) => {
         if (t.id !== activeTabId || !t.root) return t;
@@ -491,6 +580,7 @@ export default function App() {
         let changed = false;
         const contents = { ...t.contents };
         for (const id of vis) {
+          notifiedRef.current.delete(id);
           if (contents[id]?.attention) {
             contents[id] = { ...contents[id], attention: false };
             changed = true;
@@ -499,7 +589,7 @@ export default function App() {
         return changed ? { ...t, contents } : t;
       }),
     );
-  }, [activeTabId, visibleKey]);
+  }, [activeTabId, visibleKey, windowFocused]);
 
   const restoredRef = useRef(false);
 

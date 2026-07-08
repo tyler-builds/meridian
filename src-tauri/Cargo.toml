@@ -35,6 +35,11 @@ tauri-plugin-process = "2"
 # to launch the system browser for the Jira OAuth consent flow and external
 # links — correctly resolves the default browser and preserves query strings.
 tauri-plugin-opener = "2"
+# System notifications (Windows toast / macOS Notification Center) raised when
+# Claude finishes a turn or needs input in a tab you aren't looking at, while the
+# Meridian window is unfocused. Driven by the Claude Code Stop/Notification hooks
+# that call back to the localhost server (see the /attention route in mcp.rs).
+tauri-plugin-notification = "2"
 portable-pty = "0.9.0"
 which = "8.0.3"
 tauri-plugin-window-state = "2.4.1"
