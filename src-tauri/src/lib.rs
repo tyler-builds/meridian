@@ -2525,6 +2525,7 @@ fn read_live_url(webview: &tauri::Webview) -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     webview
         .with_webview(move |platform| {
+            let _op = crate::watchdog::MainOpGuard::new("read_live_url");
             use objc2_web_kit::WKWebView;
             let ptr = platform.inner() as *mut WKWebView;
             let url = if ptr.is_null() {
@@ -2630,6 +2631,7 @@ pub(crate) fn browser_eval_with_result(
 
     webview
         .with_webview(move |platform| unsafe {
+            let _op = crate::watchdog::MainOpGuard::new("browser_eval_with_result");
             let controller = platform.controller();
             let core = match controller.CoreWebView2() {
                 Ok(c) => c,
@@ -2726,6 +2728,7 @@ pub(crate) fn browser_screenshot_png(
 
     webview
         .with_webview(move |platform| unsafe {
+            let _op = crate::watchdog::MainOpGuard::new("browser_screenshot_png");
             let controller = platform.controller();
             let core = match controller.CoreWebView2() {
                 Ok(c) => c,

@@ -36,6 +36,67 @@ pub fn command_finished(name: &str) {
     }
 }
 
+/// The most recent native operation we deliberately scheduled onto the main
+/// thread — the `with_webview`/COM closures that run as *no-command* event-loop
+/// work and are the usual suspects when the loop wedges with nothing in the
+/// invoke handler. Unlike [`CURRENT`] (sync commands, which the invoke handler
+/// brackets for us), this is a breadcrumb the closures set themselves: it holds
+/// the last op's name, when it started, and — crucially — whether it has
+/// finished. That lets a no-command stall say either "op X is still running"
+/// (X is the culprit) or "op X finished Nms ago" (the block is inside the event
+/// loop / WebView2 itself, not our code), instead of the old blind guess.
+static MAIN_OP: Mutex<Option<MainOp>> = Mutex::new(None);
+
+#[derive(Clone)]
+struct MainOp {
+    name: &'static str,
+    started: Instant,
+    finished_at: Option<Instant>,
+}
+
+fn main_op_started(name: &'static str) {
+    if let Ok(mut guard) = MAIN_OP.lock() {
+        *guard = Some(MainOp {
+            name,
+            started: Instant::now(),
+            finished_at: None,
+        });
+    }
+}
+
+fn main_op_finished(name: &'static str) {
+    if let Ok(mut guard) = MAIN_OP.lock() {
+        if let Some(op) = guard.as_mut() {
+            // Only close the op we opened, and only once — a later op that
+            // overwrote the slot must not be marked finished by our drop.
+            if op.name == name && op.finished_at.is_none() {
+                op.finished_at = Some(Instant::now());
+            }
+        }
+    }
+}
+
+/// RAII marker for a native operation that runs on the main thread. Construct it
+/// at the top of a closure Tauri runs there (e.g. inside `with_webview`); it
+/// records the op on creation and marks it finished on drop, so the breadcrumb
+/// is correct across early returns and `?`. Must be created *and* dropped on the
+/// main thread — the lock it takes is held only for microseconds so it can never
+/// contribute to the stall it helps diagnose.
+pub struct MainOpGuard(&'static str);
+
+impl MainOpGuard {
+    pub fn new(name: &'static str) -> Self {
+        main_op_started(name);
+        MainOpGuard(name)
+    }
+}
+
+impl Drop for MainOpGuard {
+    fn drop(&mut self) {
+        main_op_finished(self.0);
+    }
+}
+
 /// Heartbeat cadence, and the staleness that counts as a stall (mirrors the
 /// frontend watchdog's thresholds).
 const TICK: Duration = Duration::from_secs(1);
@@ -78,11 +139,32 @@ pub fn start(app: AppHandle) {
                              command '{name}' running for {}ms",
                             started.elapsed().as_millis()
                         ),
-                        None => log::error!(
-                            "native watchdog: main thread unresponsive ~{staleness}ms; \
-                             no command executing (event-loop/webview work, or a \
-                             callback such as emit/with_webview)"
-                        ),
+                        None => {
+                            let op = MAIN_OP.lock().ok().and_then(|g| g.clone());
+                            match op {
+                                Some(op) if op.finished_at.is_none() => log::error!(
+                                    "native watchdog: main thread unresponsive ~{staleness}ms; \
+                                     no command executing; last main-thread op '{}' still \
+                                     running for {}ms (likely culprit)",
+                                    op.name,
+                                    op.started.elapsed().as_millis()
+                                ),
+                                Some(op) => log::error!(
+                                    "native watchdog: main thread unresponsive ~{staleness}ms; \
+                                     no command executing; last main-thread op '{}' finished \
+                                     {}ms ago — stall is in the event loop / WebView2 itself",
+                                    op.name,
+                                    op.finished_at
+                                        .map(|t| t.elapsed().as_millis())
+                                        .unwrap_or_default()
+                                ),
+                                None => log::error!(
+                                    "native watchdog: main thread unresponsive ~{staleness}ms; \
+                                     no command executing and no recorded main-thread op \
+                                     (event-loop/webview internals)"
+                                ),
+                            }
+                        }
                     }
                 }
             } else if let Some(since) = stalled_since.take() {

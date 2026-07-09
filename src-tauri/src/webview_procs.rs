@@ -31,6 +31,7 @@ pub fn refresh(app: &AppHandle, out: Arc<Mutex<Vec<RendererInfo>>>) {
     };
     // COM/WebView2 access must be on the UI thread; with_webview schedules there.
     let _ = window.with_webview(move |platform| unsafe {
+        let _op = crate::watchdog::MainOpGuard::new("webview_procs::refresh");
         let controller = platform.controller();
         let Ok(core) = controller.CoreWebView2() else {
             return;
@@ -49,6 +50,7 @@ pub fn refresh(app: &AppHandle, out: Arc<Mutex<Vec<RendererInfo>>>) {
             move |result: windows_core::Result<()>,
                   collection: Option<ICoreWebView2ProcessExtendedInfoCollection>|
                   -> windows_core::Result<()> {
+                let _op = crate::watchdog::MainOpGuard::new("webview_procs::refresh(callback)");
                 if result.is_err() {
                     return Ok(());
                 }
