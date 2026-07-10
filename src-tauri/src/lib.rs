@@ -1474,6 +1474,11 @@ fn pty_spawn(
     if let Some(path) = resolved.path.lock().unwrap().as_ref() {
         cmd.env("PATH", path);
     }
+    // Advertise a color-capable terminal. GUI launches (Finder/Dock via launchd)
+    // inherit no TERM, so zsh and CLI tools disable ANSI color without this.
+    // Set before the per-tab env below so an explicit override still wins.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
     // Extra environment for the shell (and anything it launches, e.g. a Claude
     // tab sets CLAUDE_CODE_NO_FLICKER so `claude` starts in fullscreen).
     if let Some(env) = env {
