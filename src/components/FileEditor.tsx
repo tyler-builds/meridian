@@ -11,10 +11,37 @@ import { acquireLspClient, releaseLspClient } from "@/lib/editorModels";
 import { subscribeReveal } from "@/lib/editorReveal";
 import { onProjectFilesChange, readFileText, writeFileText } from "@/lib/tauri";
 import { useSettings } from "@/lib/settings";
+import { pushToast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 /** Files the TypeScript/JavaScript language server handles. */
 const LSP_FILE = /\.(tsx?|jsx?|mts|cts|mjs|cjs)$/;
+
+/**
+ * Longest we wait for format-on-save before saving unformatted. Formatting runs
+ * the project's Prettier (a Node process) which can hang on a bad plugin or an
+ * interactive prompt; without this cap the save would never complete.
+ */
+const FORMAT_TIMEOUT_MS = 3000;
+
+class TimeoutError extends Error {}
+
+/** Reject with `TimeoutError` if `p` doesn't settle within `ms`. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError()), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
 
 /** Files the Markdown preview can render. */
 const MARKDOWN_FILE = /\.(md|markdown)$/i;
@@ -106,24 +133,44 @@ export function FileEditor({
   const saveActive = useCallback(async () => {
     const model = modelRef.current;
     if (!model || savedVersionRef.current === null) return;
-    try {
-      if (formatOnSaveRef.current && editorRef.current?.getModel() === model) {
+
+    // Format-on-save is best-effort and must never block the write: a formatter
+    // that errors is ignored (save as-is), and one that hangs is abandoned after
+    // FORMAT_TIMEOUT_MS so the save still completes rather than silently never
+    // running. Only a real write failure below is surfaced to the user.
+    if (formatOnSaveRef.current && editorRef.current?.getModel() === model) {
+      const action = editorRef.current.getAction("editor.action.formatDocument");
+      if (action) {
         try {
-          await editorRef.current
-            .getAction("editor.action.formatDocument")
-            ?.run();
-        } catch {
-          /* formatting failed (e.g. syntax error); save the file as-is */
+          await withTimeout(Promise.resolve(action.run()), FORMAT_TIMEOUT_MS);
+        } catch (err) {
+          if (err instanceof TimeoutError) {
+            pushToast(
+              "info",
+              "Formatting timed out",
+              "Saved without formatting — the formatter didn't respond.",
+            );
+          }
+          /* other errors (e.g. syntax error): fall through and save as-is */
         }
       }
-      const written = model.getValue();
-      await writeFileText(rootRef.current, relRef.current, written);
-      selfWriteRef.current = written;
-      savedVersionRef.current = model.getAlternativeVersionId();
-      reportDirty(false);
-    } catch (err) {
-      console.error("Failed to save file:", err);
     }
+
+    const written = model.getValue();
+    try {
+      await writeFileText(rootRef.current, relRef.current, written);
+    } catch (err) {
+      // Keep the dirty marker (reportDirty is not cleared) so the unsaved state
+      // stays visible, and tell the user why — the write silently failing was
+      // the main way a save appeared not to "work".
+      console.error("Failed to save file:", err);
+      const name = relRef.current.split("/").pop() ?? relRef.current;
+      pushToast("error", `Couldn't save ${name}`, String(err));
+      return;
+    }
+    selfWriteRef.current = written;
+    savedVersionRef.current = model.getAlternativeVersionId();
+    reportDirty(false);
   }, [reportDirty]);
 
   // Create the editor + model once, for this file.

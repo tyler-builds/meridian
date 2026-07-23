@@ -115,6 +115,14 @@ export function readFileText(root: string, rel: string): Promise<string> {
   return invoke<string>("read_file_text", { root, rel });
 }
 
+/**
+ * Read a file as raw bytes (project root + relative path) for media preview.
+ * Resolves to an `ArrayBuffer` (the command returns a binary IPC response).
+ */
+export function readFileBytes(root: string, rel: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_file_bytes", { root, rel });
+}
+
 /** Resolve a project's favicon as a data URL (t3code-style detection), or null. */
 export function findProjectFavicon(root: string): Promise<string | null> {
   return invoke<string | null>("find_project_favicon", { root });

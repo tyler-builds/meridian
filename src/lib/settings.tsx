@@ -79,6 +79,13 @@ interface SettingsContextValue {
    */
   verticalProjectTabs: boolean;
   setVerticalProjectTabs: (value: boolean) => void;
+  /**
+   * When `verticalProjectTabs` is on, collapse the rail to a narrow icon-only
+   * column (~48px): each project shows its favicon, or generated initials when
+   * it has none, with no text label. Ignored in horizontal mode. Off by default.
+   */
+  projectRailIconsOnly: boolean;
+  setProjectRailIconsOnly: (value: boolean) => void;
   /** Diff view: stacked (unified) vs side-by-side (split). */
   diffStyle: "unified" | "split";
   setDiffStyle: (value: "unified" | "split") => void;
@@ -151,6 +158,10 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   // Off by default — project tabs live in a horizontal strip in the title bar.
   const [verticalProjectTabs, setVerticalProjectTabsState] = useState<boolean>(
     () => persist.getItem("meridian.verticalProjectTabs") === "1",
+  );
+  // Off by default — the vertical rail shows project names alongside icons.
+  const [projectRailIconsOnly, setProjectRailIconsOnlyState] = useState<boolean>(
+    () => persist.getItem("meridian.projectRailIconsOnly") === "1",
   );
   // Diff view preferences (default: unified, no wrap, show whitespace).
   const [diffStyle, setDiffStyleState] = useState<"unified" | "split">(() =>
@@ -280,6 +291,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     setVerticalProjectTabsState(value);
   };
 
+  const setProjectRailIconsOnly = (value: boolean) => {
+    persist.setItem("meridian.projectRailIconsOnly", value ? "1" : "0");
+    setProjectRailIconsOnlyState(value);
+  };
+
   const setDiffStyle = (value: "unified" | "split") => {
     persist.setItem("meridian.diffStyle", value);
     setDiffStyleState(value);
@@ -337,6 +353,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         setMarkdownPreviewOnly,
         verticalProjectTabs,
         setVerticalProjectTabs,
+        projectRailIconsOnly,
+        setProjectRailIconsOnly,
         dangerouslySkipPermissions,
         setDangerouslySkipPermissions,
         claudePath,

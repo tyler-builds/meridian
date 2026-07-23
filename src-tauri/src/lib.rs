@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -356,13 +357,87 @@ async fn read_file_text(root: String, rel: String) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Write text content to a file (project root + relative path).
+/// Ceiling for in-editor media preview. Images/videos load fully into the
+/// webview as a Blob, so cap it to keep a huge file from exhausting memory.
+const MAX_MEDIA_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read a file as raw bytes (project root + relative path) for media preview.
+/// Returned as a binary IPC response (an `ArrayBuffer` on the JS side), so no
+/// base64/UTF-8 round-trip — the frontend wraps it in a Blob URL for an
+/// `<img>`/`<video>`.
+#[tauri::command]
+async fn read_file_bytes(root: String, rel: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        let mut path = std::path::PathBuf::from(&root);
+        path.push(&rel);
+        let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        if meta.len() > MAX_MEDIA_BYTES {
+            return Err("File is too large to preview".to_string());
+        }
+        std::fs::read(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Monotonic sequence for staging-file names, so concurrent saves (even of the
+/// same path) never collide on their temp file.
+static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write text content to a file (project root + relative path) atomically.
+///
+/// The content is staged in a sibling temp file and then renamed over the
+/// target — an atomic replace on the same filesystem. This avoids leaving a
+/// truncated/partial file if the write is interrupted, and sidesteps most of the
+/// transient sharing violations a direct truncate hits on Windows when antivirus,
+/// a sync client, or our own file watcher is briefly holding the file. The final
+/// rename is retried a few times to ride out such a short-lived lock.
 #[tauri::command]
 async fn write_file_text(root: String, rel: String, content: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut path = std::path::PathBuf::from(&root);
+        let mut path = PathBuf::from(&root);
         path.push(&rel);
-        std::fs::write(&path, content).map_err(|e| e.to_string())
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("Invalid file path: {}", path.display()))?;
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".to_string());
+
+        // Stage in the *same* directory so the rename stays on one filesystem —
+        // a cross-device rename isn't atomic and fails outright (EXDEV).
+        let seq = WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!(".{file_name}.meridian-{}-{seq}.tmp", std::process::id()));
+
+        if let Err(e) = std::fs::write(&tmp, content.as_bytes()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
+
+        // Best-effort: carry the target's permissions onto the replacement so an
+        // atomic swap doesn't reset the mode (e.g. an executable script losing +x).
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+
+        // `fs::rename` replaces an existing destination atomically (MoveFileExW
+        // with REPLACE_EXISTING on Windows; rename(2) elsewhere). Retry a few
+        // times so a momentary lock on the target doesn't fail the save.
+        let mut last_err = None;
+        for attempt in 0..5u64 {
+            match std::fs::rename(&tmp, &path) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&tmp);
+        Err(last_err.unwrap_or_else(|| "rename failed".to_string()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3604,6 +3679,7 @@ pub fn run() {
         watch_project_tree,
         unwatch_project_tree,
         read_file_text,
+        read_file_bytes,
         write_file_text,
         prettier_format,
         read_prettier_config_files,

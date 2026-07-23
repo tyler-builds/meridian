@@ -139,13 +139,21 @@ function SettingRow({
   title,
   description,
   children,
+  indent,
 }: {
   title: string;
   description: string;
   children: ReactNode;
+  /** Nest the row under the preceding one (a sub-setting), with a left rule. */
+  indent?: boolean;
 }) {
   return (
-    <div className="flex items-center justify-between gap-6 py-2">
+    <div
+      className={cn(
+        "flex items-center justify-between gap-6 py-2",
+        indent && "ml-3 border-l border-border pl-4",
+      )}
+    >
       <div className="flex min-w-0 flex-col">
         <span className="text-[13px] text-fg">{title}</span>
         <span className="text-xs text-fg-subtle">{description}</span>
@@ -289,7 +297,12 @@ function ClaudeBinaryRow() {
 }
 
 function AppearanceSection() {
-  const { verticalProjectTabs, setVerticalProjectTabs } = useSettings();
+  const {
+    verticalProjectTabs,
+    setVerticalProjectTabs,
+    projectRailIconsOnly,
+    setProjectRailIconsOnly,
+  } = useSettings();
   return (
     <>
       <SettingRow
@@ -299,6 +312,17 @@ function AppearanceSection() {
         <Switch
           checked={verticalProjectTabs}
           onCheckedChange={setVerticalProjectTabs}
+        />
+      </SettingRow>
+      <SettingRow
+        indent
+        title="Use icons only"
+        description="Collapse the vertical rail to a narrow icon-only column. Each project shows its icon, or its initials when it has none. No effect while vertical project tabs are off."
+      >
+        <Switch
+          checked={projectRailIconsOnly}
+          onCheckedChange={setProjectRailIconsOnly}
+          disabled={!verticalProjectTabs}
         />
       </SettingRow>
     </>
