@@ -858,3 +858,12 @@ export function onBrowserNewTab(
 ): Promise<UnlistenFn> {
   return listen<string>(`browser://newtab/${id}`, (e) => cb(e.payload));
 }
+
+/**
+ * macOS only: show or hide the native traffic lights. Used by the icon-only
+ * project rail, which is narrower than the buttons' span — they stay hidden
+ * except while the pointer is near the top-left corner. No-op elsewhere.
+ */
+export function setTrafficLightsVisible(visible: boolean): Promise<void> {
+  return invoke("set_traffic_lights_visible", { visible });
+}

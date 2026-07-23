@@ -3209,6 +3209,36 @@ fn frontend_log(level: String, message: String) {
     }
 }
 
+/// Show or hide the macOS traffic lights (the native window buttons). The
+/// icon-only project rail is narrower than the buttons' span, so they'd
+/// overlap the file-tree header; the frontend hides them and reveals them only
+/// while the pointer is near the top-left corner. No-op on other platforms.
+#[tauri::command]
+fn set_traffic_lights_visible(window: tauri::WebviewWindow, visible: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        let win = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            use objc2_app_kit::{NSWindow, NSWindowButton};
+            let Ok(ptr) = win.ns_window() else { return };
+            // SAFETY: `run_on_main_thread` guarantees the main thread, and the
+            // pointer is the live NSWindow backing this Tauri window.
+            let ns: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+            for kind in [
+                NSWindowButton::CloseButton,
+                NSWindowButton::MiniaturizeButton,
+                NSWindowButton::ZoomButton,
+            ] {
+                if let Some(button) = ns.standardWindowButton(kind) {
+                    button.setHidden(!visible);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, visible);
+}
+
 /// Install a panic hook that appends every Rust panic (message + backtrace)
 /// to `crash.log` in the app log dir before the process dies. Panics on the
 /// main thread kill the app with nothing in the regular log — this file is
@@ -3830,6 +3860,7 @@ pub fn run() {
         claude_usage,
         resource_stats,
         frontend_log,
+        set_traffic_lights_visible,
         jira::jira_status,
         jira::jira_connect,
         jira::jira_disconnect,

@@ -13,11 +13,12 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { FolderOpen, Plus, SquareTerminal, X } from "lucide-react";
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import type { ProjectTab } from "@/types";
 import { cn, isMac } from "@/lib/utils";
 import { setObstruction } from "@/lib/nativeSurface";
+import { setTrafficLightsVisible } from "@/lib/tauri";
 import { TabContextMenu } from "@/components/TabBar";
 import { ProjectAvatar } from "@/components/ProjectAvatar";
 import {
@@ -252,6 +253,33 @@ export function ProjectRail({
   onOpenProject: () => void;
   onOpenScratch: () => void;
 }) {
+  // In icon-only mode the rail (54px) is narrower than the macOS traffic
+  // lights (~72px span), which would overlap the file-tree header. Hide them
+  // and reveal only while the pointer is near the top-left corner. Tracked via
+  // window mousemove rather than hover on the rail: the native buttons sit
+  // above the webview and swallow pointer events, so a rail mouseleave would
+  // hide the buttons under the cursor mid-click. No mousemove fires while the
+  // pointer is over the buttons themselves, which keeps them visible there.
+  useEffect(() => {
+    if (!(isMac && iconsOnly)) return;
+    let visible = true;
+    const set = (next: boolean) => {
+      if (next === visible) return;
+      visible = next;
+      setTrafficLightsVisible(next).catch(() => {
+        /* not running under Tauri */
+      });
+    };
+    set(false);
+    const onMove = (e: MouseEvent) =>
+      set(e.clientX <= 84 && e.clientY <= 36);
+    window.addEventListener("mousemove", onMove);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      set(true);
+    };
+  }, [iconsOnly]);
+
   // A small distance threshold so a plain click still selects/closes a tab
   // rather than starting a drag.
   const sensors = useSensors(

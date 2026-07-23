@@ -99,3 +99,15 @@ windows = { version = "0.61", features = [
 # during a slow load). Versions match the ones Tauri/wry already lock.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-web-kit = { version = "0.3", default-features = false, features = ["WKWebView"] }
+
+# macOS-only: toggle the native traffic lights. The icon-only project rail is
+# narrower than the buttons' span, so the frontend hides them and reveals them
+# only while the pointer is near the top-left corner. Version matches the one
+# Tauri/wry already lock.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSWindow",
+    "NSButton",
+    "NSControl",
+    "NSView",
+    "NSResponder",
+] }
