@@ -12,12 +12,27 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Copy, FolderCode, Plus, Settings, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  Copy,
+  FolderOpen,
+  Plus,
+  Settings,
+  SquareTerminal,
+  X,
+} from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
 import type { ProjectTab } from "@/types";
 import { cn, isMac } from "@/lib/utils";
+import { setObstruction } from "@/lib/nativeSurface";
 import { WindowControls } from "@/components/WindowControls";
+import { ProjectAvatar } from "@/components/ProjectAvatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 /**
  * Right-click menu for a project tab. Cursor-anchored, grows downward (the tab
@@ -72,34 +87,56 @@ export function TabContextMenu({
   );
 }
 
-function ProjectTabItem({
+/** A project tab's icon: a glyph for a scratch space, else the project avatar. */
+function TabIcon({ tab, active }: { tab: ProjectTab; active: boolean }) {
+  if (tab.scratch) {
+    return (
+      <SquareTerminal
+        size={15}
+        strokeWidth={1.8}
+        className={cn("shrink-0", active ? "text-fg" : "text-fg-subtle")}
+      />
+    );
+  }
+  return (
+    <ProjectAvatar
+      favicon={tab.favicon}
+      name={tab.name}
+      size={15}
+      active={active}
+    />
+  );
+}
+
+/**
+ * The visual of one tab. `dnd` is supplied for draggable project tabs; scratch
+ * tabs render pinned (no `dnd`), so they can't be dragged or reordered.
+ */
+function TabView({
   tab,
   active,
+  dnd,
   onSelect,
   onClose,
   onContextMenu,
 }: {
   tab: ProjectTab;
   active: boolean;
+  dnd?: {
+    setNodeRef: (node: HTMLElement | null) => void;
+    style: CSSProperties;
+    handleProps: Record<string, unknown>;
+    isDragging: boolean;
+  };
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, tab: ProjectTab) => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: tab.id });
-
   return (
     <div
-      ref={setNodeRef}
-      style={{
-        // Lock dragging to the horizontal axis: the tab strip is a horizontal
-        // list, but the dragged tab otherwise follows the pointer vertically too
-        // (the sort strategy only lays out the siblings, not the dragged item).
-        transform: CSS.Transform.toString(transform && { ...transform, y: 0 }),
-        transition,
-      }}
-      {...attributes}
-      {...listeners}
+      ref={dnd?.setNodeRef}
+      style={dnd?.style}
+      {...(dnd?.handleProps ?? {})}
       onClick={() => onSelect(tab.id)}
       onMouseDown={(e) => {
         if (e.button === 1) {
@@ -113,32 +150,19 @@ function ProjectTabItem({
         // Tabs size to their name and only shrink+truncate (down to a readable
         // minimum) once the row runs out of room.
         "group flex h-7 min-w-[88px] cursor-default items-center gap-2 rounded-md px-2.5 text-[13px] transition-colors",
-        isDragging ? "opacity-50" : "",
+        dnd?.isDragging ? "opacity-50" : "",
         active
           ? "bg-bg-elevated text-fg"
           : "text-fg-subtle hover:bg-bg-hover hover:text-fg",
       )}
     >
-      {tab.favicon ? (
-        <img
-          src={tab.favicon}
-          alt=""
-          className="h-[15px] w-[15px] shrink-0 rounded-[3px] object-contain"
-        />
-      ) : (
-        <FolderCode
-          size={15}
-          strokeWidth={1.8}
-          className={cn("shrink-0", active ? "text-fg-subtle" : "text-fg-faint")}
-        />
-      )}
+      <TabIcon tab={tab} active={active} />
       <span className="min-w-0 truncate">{tab.name}</span>
       <span className="relative -mr-1 flex h-4 w-4 shrink-0 items-center justify-center">
         {/* Attention dot when a Claude tab inside this (non-active) project is
             waiting; derived from its main tabs so it clears once they're viewed.
             Fades on hover so the close button takes the slot. */}
-        {!active &&
-          Object.values(tab.contents).some((c) => c.attention) && (
+        {!active && Object.values(tab.contents).some((c) => c.attention) && (
           <span className="pointer-events-none absolute h-[7px] w-[7px] rounded-full bg-accent transition-opacity group-hover:opacity-0" />
         )}
         <button
@@ -160,6 +184,43 @@ function ProjectTabItem({
   );
 }
 
+/** A draggable, reorderable project tab. */
+function SortableProjectTab(props: {
+  tab: ProjectTab;
+  active: boolean;
+  onSelect: (id: string) => void;
+  onClose: (id: string) => void;
+  onContextMenu: (e: React.MouseEvent, tab: ProjectTab) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: props.tab.id });
+  return (
+    <TabView
+      {...props}
+      dnd={{
+        setNodeRef,
+        // Lock dragging to the horizontal axis: the tab strip is a horizontal
+        // list, but the dragged tab otherwise follows the pointer vertically too
+        // (the sort strategy only lays out the siblings, not the dragged item).
+        style: {
+          transform: CSS.Transform.toString(
+            transform && { ...transform, y: 0 },
+          ),
+          transition,
+        },
+        handleProps: { ...attributes, ...listeners },
+        isDragging,
+      }}
+    />
+  );
+}
+
 export function TabBar({
   tabs,
   activeTabId,
@@ -167,6 +228,7 @@ export function TabBar({
   onClose,
   onReorder,
   onOpenProject,
+  onOpenScratch,
   onOpenSettings,
   showProjectTabs = true,
 }: {
@@ -176,6 +238,7 @@ export function TabBar({
   onClose: (id: string) => void;
   onReorder: (fromId: string, toId: string) => void;
   onOpenProject: () => void;
+  onOpenScratch: () => void;
   onOpenSettings: () => void;
   /**
    * Render the project tabs (and the new-project button) in the strip. When
@@ -190,9 +253,14 @@ export function TabBar({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
   );
 
-  const [menu, setMenu] = useState<{ x: number; y: number; path: string } | null>(
-    null,
-  );
+  const scratchTabs = tabs.filter((t) => t.scratch);
+  const projectTabs = tabs.filter((t) => !t.scratch);
+
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    path: string;
+  } | null>(null);
 
   const onContextMenu = (e: React.MouseEvent, tab: ProjectTab) => {
     e.preventDefault();
@@ -226,18 +294,33 @@ export function TabBar({
     >
       {showProjectTabs && (
         <>
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragEnd={onDragEnd}
-          >
-            <SortableContext
-              items={tabs.map((t) => t.id)}
-              strategy={horizontalListSortingStrategy}
+          <div className="no-scrollbar flex h-full min-w-0 items-center gap-1 overflow-x-auto">
+            {/* Scratch spaces are pinned first (non-draggable) and set off with a
+                divider, so folder-less workspaces read apart from projects. */}
+            {scratchTabs.map((tab) => (
+              <TabView
+                key={tab.id}
+                tab={tab}
+                active={tab.id === activeTabId}
+                onSelect={onSelect}
+                onClose={onClose}
+                onContextMenu={onContextMenu}
+              />
+            ))}
+            {scratchTabs.length > 0 && projectTabs.length > 0 && (
+              <span className="mx-1 h-5 w-px shrink-0 self-center bg-border" />
+            )}
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={onDragEnd}
             >
-              <div className="no-scrollbar flex h-full min-w-0 items-center gap-1 overflow-x-auto">
-                {tabs.map((tab) => (
-                  <ProjectTabItem
+              <SortableContext
+                items={projectTabs.map((t) => t.id)}
+                strategy={horizontalListSortingStrategy}
+              >
+                {projectTabs.map((tab) => (
+                  <SortableProjectTab
                     key={tab.id}
                     tab={tab}
                     active={tab.id === activeTabId}
@@ -246,19 +329,34 @@ export function TabBar({
                     onContextMenu={onContextMenu}
                   />
                 ))}
-              </div>
-            </SortableContext>
-          </DndContext>
+              </SortableContext>
+            </DndContext>
+          </div>
 
-          {/* New tab sits right next to the last tab. */}
-          <button
-            onClick={onOpenProject}
-            className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
-            aria-label="Open project"
-            title="Open project"
+          {/* New-workspace menu sits right next to the last tab. */}
+          <DropdownMenu
+            onOpenChange={(o) => setObstruction("new-workspace", o)}
           >
-            <Plus size={16} strokeWidth={2} />
-          </button>
+            <DropdownMenuTrigger asChild>
+              <button
+                className="ml-1 flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-md text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg data-[state=open]:bg-bg-hover data-[state=open]:text-fg"
+                aria-label="New workspace"
+                title="New workspace"
+              >
+                <Plus size={16} strokeWidth={2} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem onSelect={onOpenProject}>
+                <FolderOpen size={15} strokeWidth={1.8} />
+                Open folder…
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onOpenScratch}>
+                <SquareTerminal size={15} strokeWidth={1.8} />
+                New scratch space
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </>
       )}
 

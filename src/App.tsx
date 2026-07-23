@@ -19,6 +19,7 @@ import { claudeBaseCommand, isClaudeCommand } from "@/lib/claude";
 import { ensureNotificationPermission, notifyAttention } from "@/lib/notify";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { homeDir } from "@tauri-apps/api/path";
 import { loadSession, saveSession } from "@/lib/session";
 import { setObstruction } from "@/lib/nativeSurface";
 import { useSettings } from "@/lib/settings";
@@ -46,6 +47,7 @@ import {
 } from "@/lib/paneModel";
 import { TabBar } from "@/components/TabBar";
 import { ProjectRail } from "@/components/ProjectRail";
+import { Toaster } from "@/components/Toaster";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ProjectView } from "@/components/ProjectView";
@@ -83,6 +85,7 @@ export default function App() {
     effectiveClaudePath,
     shellProgram,
     verticalProjectTabs,
+    projectRailIconsOnly,
   } = useSettings();
   const [tabs, setTabs] = useState<ProjectTab[]>([]);
   const tabsRef = useRef(tabs);
@@ -132,7 +135,9 @@ export default function App() {
 
     void findProjectFavicon(path)
       .then((favicon) =>
-        setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, favicon } : t))),
+        setTabs((prev) =>
+          prev.map((t) => (t.id === id ? { ...t, favicon } : t)),
+        ),
       )
       .catch(() => {});
 
@@ -148,6 +153,37 @@ export default function App() {
         ),
       );
     }
+  }, []);
+
+  // Open (or focus, if it already exists) the single folder-less scratch space —
+  // a workspace with no project root, for ad-hoc terminals/browsers/Claude. Its
+  // `path` is the home dir so its terminals spawn somewhere sensible.
+  const openScratch = useCallback(async () => {
+    const existing = tabsRef.current.find((t) => t.scratch);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    let path = "";
+    try {
+      path = await homeDir();
+    } catch {
+      /* no home dir available; terminals fall back to the shell's default */
+    }
+    const id = crypto.randomUUID();
+    const tab: ProjectTab = {
+      id,
+      name: "Scratch",
+      path,
+      scratch: true,
+      paths: [],
+      loading: false,
+      contents: {},
+      root: null,
+      activePaneId: null,
+    };
+    setTabs((prev) => [...prev, tab]);
+    setActiveTabId(id);
   }, []);
 
   const closeTab = useCallback((id: string) => {
@@ -197,7 +233,9 @@ export default function App() {
   const newTerminal = useCallback(
     (projectId: string, paneId?: string) => {
       const id = newContentId();
-      updateProject(projectId, (t) => openContent(t, terminalItem(t, id), paneId));
+      updateProject(projectId, (t) =>
+        openContent(t, terminalItem(t, id), paneId),
+      );
     },
     [updateProject],
   );
@@ -213,7 +251,10 @@ export default function App() {
       const root = tabsRef.current.find((t) => t.id === projectId)?.path;
       if (browserMcpEnabled && root) {
         try {
-          const configPath = await claudeBrowserMcpConfig(root, browserMcpEvalJs);
+          const configPath = await claudeBrowserMcpConfig(
+            root,
+            browserMcpEvalJs,
+          );
           const tools = [
             "mcp__browser__list_tabs",
             "mcp__browser__read_tab",
@@ -452,7 +493,12 @@ export default function App() {
   );
 
   const moveTab = useCallback(
-    (projectId: string, contentId: string, targetPaneId: string, index?: number) => {
+    (
+      projectId: string,
+      contentId: string,
+      targetPaneId: string,
+      index?: number,
+    ) => {
       updateProject(projectId, (t) =>
         moveTabModel(t, contentId, targetPaneId, index),
       );
@@ -461,8 +507,15 @@ export default function App() {
   );
 
   const splitWithTab = useCallback(
-    (projectId: string, targetPaneId: string, contentId: string, side: DropSide) => {
-      updateProject(projectId, (t) => splitWith(t, targetPaneId, contentId, side));
+    (
+      projectId: string,
+      targetPaneId: string,
+      contentId: string,
+      side: DropSide,
+    ) => {
+      updateProject(projectId, (t) =>
+        splitWith(t, targetPaneId, contentId, side),
+      );
     },
     [updateProject],
   );
@@ -483,7 +536,10 @@ export default function App() {
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     const w = getCurrentWindow();
-    void w.isFocused().then(setWindowFocused).catch(() => {});
+    void w
+      .isFocused()
+      .then(setWindowFocused)
+      .catch(() => {});
     w.onFocusChanged(({ payload }) => setWindowFocused(payload))
       .then((u) => (unlisten = u))
       .catch(() => {});
@@ -569,8 +625,9 @@ export default function App() {
   // (refocus) re-arms notifications for its visible tabs. Clears every currently-
   // visible content of the active project (splits can show several at once).
   const activeProject = tabs.find((t) => t.id === activeTabId);
-  const visibleKey =
-    activeProject?.root ? visibleContentIds(activeProject.root).join(",") : "";
+  const visibleKey = activeProject?.root
+    ? visibleContentIds(activeProject.root).join(",")
+    : "";
   useEffect(() => {
     if (activeTabId == null || !windowFocused) return;
     setTabs((prev) =>
@@ -601,8 +658,10 @@ export default function App() {
         id: p.id,
         name: p.name,
         path: p.path,
+        scratch: p.scratch,
         paths: [],
-        loading: true,
+        // Scratch spaces have no folder to read, so they're never "loading".
+        loading: !p.scratch,
         contents: Object.fromEntries(p.contents.map((c) => [c.id, c])),
         root: p.root,
         activePaneId:
@@ -620,6 +679,7 @@ export default function App() {
           : (restored[0]?.id ?? null),
       );
       for (const t of restored) {
+        if (t.scratch) continue; // no folder → no favicon or file tree
         void findProjectFavicon(t.path)
           .then((favicon) =>
             setTabs((prev) =>
@@ -638,7 +698,9 @@ export default function App() {
           .catch((err) =>
             setTabs((prev) =>
               prev.map((x) =>
-                x.id === t.id ? { ...x, loading: false, error: String(err) } : x,
+                x.id === t.id
+                  ? { ...x, loading: false, error: String(err) }
+                  : x,
               ),
             ),
           );
@@ -660,6 +722,7 @@ export default function App() {
     const present = new Set(tabs.map((t) => t.id));
 
     for (const t of tabs) {
+      if (t.scratch) continue; // no folder to watch
       if (watchers.has(t.id)) continue;
       watchers.set(t.id, () => {});
       const { id, path } = t;
@@ -751,7 +814,11 @@ export default function App() {
       if (key === "d") {
         if (!project || !activePaneId) return;
         stop();
-        splitNewTerminal(project.id, activePaneId, e.shiftKey ? "down" : "right");
+        splitNewTerminal(
+          project.id,
+          activePaneId,
+          e.shiftKey ? "down" : "right",
+        );
         return;
       }
 
@@ -784,6 +851,7 @@ export default function App() {
           onClose={closeTab}
           onReorder={reorderProjects}
           onOpenProject={openProject}
+          onOpenScratch={openScratch}
           onOpenSettings={() => setSettingsOpen(true)}
           showProjectTabs={!verticalProjectTabs}
         />
@@ -794,10 +862,12 @@ export default function App() {
           <ProjectRail
             tabs={tabs}
             activeTabId={activeTabId}
+            iconsOnly={projectRailIconsOnly}
             onSelect={setActiveTabId}
             onClose={closeTab}
             onReorder={reorderProjects}
             onOpenProject={openProject}
+            onOpenScratch={openScratch}
           />
         )}
 
@@ -878,7 +948,11 @@ export default function App() {
         );
       })()}
 
-      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsDialog onClose={() => setSettingsOpen(false)} />
+      )}
+
+      <Toaster />
 
       {finderOpen &&
         (() => {

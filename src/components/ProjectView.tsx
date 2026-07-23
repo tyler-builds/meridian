@@ -16,6 +16,8 @@ import { WindowControls } from "@/components/WindowControls";
 import { FileTreePanel } from "@/components/FileTreePanel";
 import { TerminalPanel } from "@/components/TerminalPanel";
 import { FileEditor } from "@/components/FileEditor";
+import { MediaViewer } from "@/components/MediaViewer";
+import { mediaInfo } from "@/lib/media";
 import { BrowserPanel } from "@/components/BrowserPanel";
 import { GitPanel } from "@/components/GitPanel";
 import { NotesPanel } from "@/components/NotesPanel";
@@ -74,11 +76,27 @@ export function ProjectView({
   onCloseContent: (projectId: string, contentId: string) => void;
   onSelectTab: (projectId: string, paneId: string, contentId: string) => void;
   onFocusPane: (projectId: string, paneId: string) => void;
-  onSplitNewTerminal: (projectId: string, paneId: string, side: DropSide) => void;
+  onSplitNewTerminal: (
+    projectId: string,
+    paneId: string,
+    side: DropSide,
+  ) => void;
   onResizePane: (projectId: string, splitId: string, sizes: number[]) => void;
-  onFileDirtyChange: (projectId: string, relPath: string, dirty: boolean) => void;
-  onBrowserUrlChange: (projectId: string, contentId: string, url: string) => void;
-  onBrowserTitleChange: (projectId: string, contentId: string, title: string) => void;
+  onFileDirtyChange: (
+    projectId: string,
+    relPath: string,
+    dirty: boolean,
+  ) => void;
+  onBrowserUrlChange: (
+    projectId: string,
+    contentId: string,
+    url: string,
+  ) => void;
+  onBrowserTitleChange: (
+    projectId: string,
+    contentId: string,
+    title: string,
+  ) => void;
   onOpenBrowserUrl: (projectId: string, url: string) => void;
   onPickElement: (projectId: string, element: PickedElement) => boolean;
   onClaudeAttention: (projectId: string, contentId: string) => void;
@@ -146,7 +164,15 @@ export function ProjectView({
       notes: () => onNewNotes(tab.id, paneId),
       search: () => onNewSearch(tab.id, paneId),
     }),
-    [tab.id, onNewTerminal, onNewBrowser, onNewClaude, onNewGit, onNewNotes, onNewSearch],
+    [
+      tab.id,
+      onNewTerminal,
+      onNewBrowser,
+      onNewClaude,
+      onNewGit,
+      onNewNotes,
+      onNewSearch,
+    ],
   );
 
   const renderContent = useCallback(
@@ -163,16 +189,31 @@ export function ProjectView({
               onClaudeAttention={() => onClaudeAttention(tab.id, content.id)}
             />
           ) : null;
-        case "file":
-          return content.relPath ? (
+        case "file": {
+          if (!content.relPath) return null;
+          const media = mediaInfo(content.relPath);
+          if (media) {
+            return (
+              <MediaViewer
+                root={tab.path}
+                relPath={content.relPath}
+                kind={media.kind}
+                mime={media.mime}
+              />
+            );
+          }
+          return (
             <FileEditor
               root={tab.path}
               relPath={content.relPath}
               active={ctx.active}
-              onDirtyChange={(rel, dirty) => onFileDirtyChange(tab.id, rel, dirty)}
+              onDirtyChange={(rel, dirty) =>
+                onFileDirtyChange(tab.id, rel, dirty)
+              }
               onOpenUrl={(url) => onOpenBrowserUrl(tab.id, url)}
             />
-          ) : null;
+          );
+        }
         case "browser":
           return (
             <BrowserPanel
@@ -228,14 +269,20 @@ export function ProjectView({
     ],
   );
 
+  // A scratch space has no folder, so it shows no file-tree sidebar (and no
+  // collapse/expand control for one).
+  const scratch = !!tab.scratch;
+  const showSidebar = !scratch && !sidebarCollapsed;
+  const showExpand = !scratch && sidebarCollapsed;
+
   // A slim chrome bar is needed only in vertical-tabs mode (to host the window
   // controls the hidden title bar would otherwise provide) or when the sidebar
   // is collapsed (to host the expand button). Otherwise panes fill the area.
-  const showChrome = verticalProjectTabs || sidebarCollapsed;
+  const showChrome = verticalProjectTabs || showExpand;
 
   return (
     <div className="flex flex-1 overflow-hidden">
-      {!sidebarCollapsed && (
+      {showSidebar && (
         <>
           <aside
             style={{ width: sidebarWidth }}
@@ -258,7 +305,9 @@ export function ProjectView({
               {tab.loading ? (
                 <p className="px-3 py-2 text-[13px] text-fg-faint">Loading…</p>
               ) : tab.error ? (
-                <p className="px-3 py-2 text-[13px] text-fg-subtle">{tab.error}</p>
+                <p className="px-3 py-2 text-[13px] text-fg-subtle">
+                  {tab.error}
+                </p>
               ) : (
                 <FileTreePanel
                   paths={tab.paths}
@@ -286,7 +335,7 @@ export function ProjectView({
               verticalProjectTabs ? "pl-2 pr-0" : "px-2",
             )}
           >
-            {sidebarCollapsed && (
+            {showExpand && (
               <button
                 onClick={onToggleSidebar}
                 className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-fg-subtle transition-colors hover:bg-bg-hover hover:text-fg"
@@ -319,6 +368,7 @@ export function ProjectView({
         <div className="relative min-h-0 flex-1">
           {!tab.root ? (
             <MainEmptyState
+              scratch={scratch}
               onNewTerminal={() => onNewTerminal(tab.id)}
               onNewBrowser={() => onNewBrowser(tab.id)}
               onNewClaude={() => onNewClaude(tab.id)}
@@ -331,12 +381,17 @@ export function ProjectView({
               contents={tab.contents}
               activePaneId={tab.activePaneId}
               projectActive={active}
+              scratch={scratch}
               renderContent={renderContent}
               onSelectTab={(paneId, cid) => onSelectTab(tab.id, paneId, cid)}
               onCloseTab={(cid) => onCloseContent(tab.id, cid)}
               onFocusPane={(paneId) => onFocusPane(tab.id, paneId)}
-              onSplit={(paneId, side) => onSplitNewTerminal(tab.id, paneId, side)}
-              onResize={(splitId, sizes) => onResizePane(tab.id, splitId, sizes)}
+              onSplit={(paneId, side) =>
+                onSplitNewTerminal(tab.id, paneId, side)
+              }
+              onResize={(splitId, sizes) =>
+                onResizePane(tab.id, splitId, sizes)
+              }
               onMoveTab={(cid, paneId, index) =>
                 onMoveTab(tab.id, cid, paneId, index)
               }

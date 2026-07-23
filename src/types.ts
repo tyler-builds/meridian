@@ -71,10 +71,19 @@ export interface ContentItem {
 export interface ProjectTab {
   /** Stable client-side id for the tab. */
   id: string;
-  /** Display name (folder basename). */
+  /** Display name (folder basename, or "Scratch" for a folder-less space). */
   name: string;
-  /** Absolute path to the project root. */
+  /**
+   * Absolute path to the project root. For a scratch space (no folder) this is
+   * instead the working directory its terminals spawn in (the user's home dir).
+   */
   path: string;
+  /**
+   * A folder-less "scratch" workspace: no file tree, no Git/Search, hosting
+   * ad-hoc terminals/browsers/Claude that aren't tied to any project. Otherwise
+   * structurally identical to a project (same contents + pane tree).
+   */
+  scratch?: boolean;
   /** Detected project favicon as a data URL, shown in the tab. */
   favicon?: string | null;
   /** Relative POSIX file paths for the tree, once loaded. */

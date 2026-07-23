@@ -8,6 +8,8 @@ export interface PersistedProject {
   id: string;
   name: string;
   path: string;
+  /** True for a folder-less scratch workspace (no file tree / Git / Search). */
+  scratch?: boolean;
   /** Content units, as an array for stable JSON. */
   contents: ContentItem[];
   /** The split layout, or null when nothing is open. */
@@ -52,9 +54,7 @@ interface OldProject {
 }
 
 function oldLeafIds(node: OldPaneNode): string[] {
-  return node.type === "leaf"
-    ? [node.id]
-    : node.children.flatMap(oldLeafIds);
+  return node.type === "leaf" ? [node.id] : node.children.flatMap(oldLeafIds);
 }
 
 /**
@@ -71,7 +71,8 @@ function migrateProject(p: OldProject): PersistedProject {
 
   for (const tab of p.mainTabs ?? []) {
     const kind = tab.kind === "diff" ? "git" : tab.kind;
-    const title = tab.kind === "diff" && tab.title === "Diff" ? "Git" : tab.title;
+    const title =
+      tab.kind === "diff" && tab.title === "Diff" ? "Git" : tab.title;
 
     if (kind === "terminal" && tab.paneTree) {
       const leaves = oldLeafIds(tab.paneTree);
@@ -107,9 +108,7 @@ function migrateProject(p: OldProject): PersistedProject {
   }
 
   const root =
-    tabOrder.length > 0
-      ? leafNode(tabOrder, activeTabId ?? tabOrder[0])
-      : null;
+    tabOrder.length > 0 ? leafNode(tabOrder, activeTabId ?? tabOrder[0]) : null;
   return {
     id: p.id,
     name: p.name,
@@ -137,6 +136,7 @@ export function loadSession(): PersistedSession | null {
             id: p.id,
             name: p.name,
             path: p.path,
+            scratch: p.scratch,
             contents: p.contents,
             root: p.root ?? null,
             activePaneId: p.activePaneId ?? null,
@@ -159,6 +159,7 @@ export function saveSession(
       id: t.id,
       name: t.name,
       path: t.path,
+      scratch: t.scratch,
       // Strip transient flags — files are re-read and Claude attention is
       // recomputed on restore.
       contents: Object.values(t.contents).map((c) => ({

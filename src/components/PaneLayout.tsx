@@ -86,11 +86,7 @@ function PaneDropZones({ paneId }: { paneId: string }) {
         zone="right"
         style={{ top: "25%", bottom: "25%", right: 0, width: "25%" }}
       />
-      <DropZone
-        paneId={paneId}
-        zone="center"
-        style={{ inset: "25%" }}
-      />
+      <DropZone paneId={paneId} zone="center" style={{ inset: "25%" }} />
     </>
   );
 }
@@ -162,10 +158,7 @@ function StripEnd({ paneId, index }: { paneId: string; index: number }) {
     data: { type: "reorder", paneId, index },
   });
   return (
-    <div
-      ref={drop.setNodeRef}
-      className="relative min-w-0 flex-1 self-stretch"
-    >
+    <div ref={drop.setNodeRef} className="relative min-w-0 flex-1 self-stretch">
       {drop.isOver && (
         <span className="pointer-events-none absolute inset-y-1 left-0 z-10 w-0.5 rounded bg-accent" />
       )}
@@ -192,6 +185,7 @@ export function PaneLayout({
   contents,
   activePaneId,
   projectActive,
+  scratch,
   renderContent,
   onSelectTab,
   onCloseTab,
@@ -206,6 +200,8 @@ export function PaneLayout({
   contents: Record<string, ContentItem>;
   activePaneId: string | null;
   projectActive: boolean;
+  /** Folder-less scratch space: its strips hide the project-only Git/Search. */
+  scratch?: boolean;
   renderContent: (
     content: ContentItem,
     ctx: { visible: boolean; active: boolean },
@@ -216,7 +212,11 @@ export function PaneLayout({
   onSplit: (paneId: string, side: DropSide) => void;
   onResize: (splitId: string, sizes: number[]) => void;
   onMoveTab: (contentId: string, targetPaneId: string, index?: number) => void;
-  onSplitWithTab: (targetPaneId: string, contentId: string, side: DropSide) => void;
+  onSplitWithTab: (
+    targetPaneId: string,
+    contentId: string,
+    side: DropSide,
+  ) => void;
   newTabActions: (paneId: string) => NewTabActions;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -232,7 +232,9 @@ export function PaneLayout({
     .map((l) => findLeaf(root, l.id))
     .filter((n): n is Leaf => n !== null);
   const paneOfContent = new Map<string, Leaf>();
-  leafNodes.forEach((leaf) => leaf.tabs.forEach((t) => paneOfContent.set(t, leaf)));
+  leafNodes.forEach((leaf) =>
+    leaf.tabs.forEach((t) => paneOfContent.set(t, leaf)),
+  );
 
   const [dragging, setDragging] = useState<string | null>(null);
   // Failsafe: if this layout unmounts mid-drag (e.g. the project tab is closed
@@ -408,6 +410,7 @@ export function PaneLayout({
                 <PaneTabStrip
                   pane={leaf}
                   contents={contents}
+                  scratch={scratch}
                   renderTab={(cid, index, node) => (
                     <StripTab
                       key={cid}
