@@ -4,12 +4,16 @@ import type { ContentItem, ProjectTab } from "@/types";
 import {
   claudeBrowserMcpConfig,
   claudeHooksConfig,
+  createDirectory,
+  createFile,
+  deletePath,
   findProjectFavicon,
   frontendLog,
   onClaudeAttentionEvent,
   onProjectTreeChange,
   pickProjectFolder,
   readProjectTree,
+  renamePath,
   unwatchProjectTree,
   watchProjectTree,
   type PickedElement,
@@ -225,6 +229,82 @@ export default function App() {
           relPath,
         };
         return openContent(t, item);
+      });
+    },
+    [updateProject],
+  );
+
+  // --- File tree mutations (create / rename / delete) ---------------------
+  // The FS watcher refreshes the tree after the on-disk change lands; these
+  // handlers do the disk op and reconcile any open editor tabs. They reject on
+  // failure so the tree can roll back its optimistic in-memory change.
+
+  const createFileEntry = useCallback(
+    async (projectId: string, relPath: string) => {
+      const t = tabsRef.current.find((x) => x.id === projectId);
+      if (!t) return;
+      await createFile(t.path, relPath);
+      openFile(projectId, relPath); // open the freshly created file
+    },
+    [openFile],
+  );
+
+  const createFolderEntry = useCallback(
+    async (projectId: string, relPath: string) => {
+      const t = tabsRef.current.find((x) => x.id === projectId);
+      if (!t) return;
+      await createDirectory(t.path, relPath);
+    },
+    [],
+  );
+
+  const deleteEntry = useCallback(
+    async (projectId: string, relPath: string) => {
+      const t = tabsRef.current.find((x) => x.id === projectId);
+      if (!t) return;
+      await deletePath(t.path, relPath);
+      // Close any open editor tab for the deleted file, or for files that lived
+      // under a deleted folder, so nothing points at a path that's gone.
+      const prefix = `${relPath}/`;
+      const doomed = Object.values(t.contents).filter(
+        (c) =>
+          c.kind === "file" &&
+          !!c.relPath &&
+          (c.relPath === relPath || c.relPath.startsWith(prefix)),
+      );
+      if (doomed.length) {
+        updateProject(projectId, (tab) =>
+          doomed.reduce((acc, c) => closeContent(acc, c.id), tab),
+        );
+      }
+    },
+    [updateProject],
+  );
+
+  const renameEntry = useCallback(
+    async (projectId: string, from: string, to: string) => {
+      const t = tabsRef.current.find((x) => x.id === projectId);
+      if (!t) return;
+      await renamePath(t.path, from, to);
+      // Repoint any open editor tab at the moved file (or files that lived under
+      // a moved folder) so it keeps showing the same content at its new path.
+      const prefix = `${from}/`;
+      updateProject(projectId, (tab) => {
+        let next = tab;
+        for (const c of Object.values(tab.contents)) {
+          if (c.kind !== "file" || !c.relPath) continue;
+          let newRel: string | null = null;
+          if (c.relPath === from) newRel = to;
+          else if (c.relPath.startsWith(prefix))
+            newRel = to + c.relPath.slice(from.length);
+          if (newRel) {
+            next = patchContent(next, c.id, {
+              relPath: newRel,
+              title: newRel.split("/").pop() ?? newRel,
+            });
+          }
+        }
+        return next;
       });
     },
     [updateProject],
@@ -894,6 +974,10 @@ export default function App() {
                     onToggleSidebar={toggleSidebar}
                     onResizeSidebar={resizeSidebar}
                     onOpenFile={openFile}
+                    onCreateFile={createFileEntry}
+                    onCreateFolder={createFolderEntry}
+                    onRenamePath={renameEntry}
+                    onDeletePath={deleteEntry}
                     onNewTerminal={newTerminal}
                     onNewBrowser={newBrowser}
                     onNewClaude={newClaude}

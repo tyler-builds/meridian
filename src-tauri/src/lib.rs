@@ -443,6 +443,103 @@ async fn write_file_text(root: String, rel: String, content: String) -> Result<(
     .map_err(|e| e.to_string())?
 }
 
+/// Resolve a project-relative path to an absolute path under `root`, rejecting
+/// anything that would escape it — absolute inputs, drive prefixes, or `..`
+/// traversal. Every filesystem mutation below goes through this so a crafted
+/// `rel` can't touch files outside the open project.
+fn resolve_within_root(root: &str, rel: &str) -> Result<PathBuf, String> {
+    let rel_path = Path::new(rel);
+    if rel_path.as_os_str().is_empty() {
+        return Err("Empty path".to_string());
+    }
+    if rel_path.is_absolute() {
+        return Err("Path must be relative to the project".to_string());
+    }
+    for comp in rel_path.components() {
+        match comp {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => return Err("Path escapes the project root".to_string()),
+        }
+    }
+    Ok(Path::new(root).join(rel_path))
+}
+
+/// Create an empty file at `root/rel`, making any missing parent directories.
+/// Fails if something already exists there (never truncates an existing file).
+#[tauri::command]
+async fn create_file(root: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = resolve_within_root(&root, &rel)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        // create_new fails if the path exists, so we never clobber a file.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Create a directory at `root/rel` (and any missing parents). Fails if a
+/// file/dir already exists there.
+#[tauri::command]
+async fn create_directory(root: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = resolve_within_root(&root, &rel)?;
+        if path.exists() {
+            return Err(format!("Already exists: {rel}"));
+        }
+        std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Delete a file, or a directory and all its contents, at `root/rel`.
+#[tauri::command]
+async fn delete_path(root: String, rel: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = resolve_within_root(&root, &rel)?;
+        // symlink_metadata so a symlinked directory is removed as the link, not
+        // followed into its target.
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
+        } else {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Rename/move `root/from` to `root/to`, making any missing parent directories.
+/// Fails if the destination already exists (never overwrites).
+#[tauri::command]
+async fn rename_path(root: String, from: String, to: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let from_path = resolve_within_root(&root, &from)?;
+        let to_path = resolve_within_root(&root, &to)?;
+        if to_path.exists() {
+            return Err(format!("Already exists: {to}"));
+        }
+        if let Some(parent) = to_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::rename(&from_path, &to_path).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // --- Prettier (project-local) ---
 //
 // Format-on-save and the editor's Format Document command prefer the project's
@@ -3681,6 +3778,10 @@ pub fn run() {
         read_file_text,
         read_file_bytes,
         write_file_text,
+        create_file,
+        create_directory,
+        delete_path,
+        rename_path,
         prettier_format,
         read_prettier_config_files,
         find_project_favicon,

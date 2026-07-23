@@ -1,9 +1,10 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { PanelLeft, Settings } from "lucide-react";
+import { FilePlus, FolderPlus, PanelLeft, Settings } from "lucide-react";
 
 import type { ContentItem, ProjectTab } from "@/types";
 import type { PickedElement } from "@/lib/tauri";
@@ -13,7 +14,7 @@ import { cn, isMac } from "@/lib/utils";
 import { registerOpenFileHandler } from "@/lib/lsp/monacoBridge";
 import { stashReveal } from "@/lib/editorReveal";
 import { WindowControls } from "@/components/WindowControls";
-import { FileTreePanel } from "@/components/FileTreePanel";
+import { FileTreePanel, type FileTreeHandle } from "@/components/FileTreePanel";
 import { TerminalPanel } from "@/components/TerminalPanel";
 import { FileEditor } from "@/components/FileEditor";
 import { MediaViewer } from "@/components/MediaViewer";
@@ -36,6 +37,10 @@ export function ProjectView({
   onToggleSidebar,
   onResizeSidebar,
   onOpenFile,
+  onCreateFile,
+  onCreateFolder,
+  onRenamePath,
+  onDeletePath,
   onNewTerminal,
   onNewBrowser,
   onNewClaude,
@@ -66,6 +71,10 @@ export function ProjectView({
   onToggleSidebar: () => void;
   onResizeSidebar: (width: number) => void;
   onOpenFile: (projectId: string, relPath: string) => void;
+  onCreateFile: (projectId: string, relPath: string) => Promise<void>;
+  onCreateFolder: (projectId: string, relPath: string) => Promise<void>;
+  onRenamePath: (projectId: string, from: string, to: string) => Promise<void>;
+  onDeletePath: (projectId: string, relPath: string) => Promise<void>;
   onNewTerminal: (projectId: string, paneId?: string) => void;
   onNewBrowser: (projectId: string, paneId?: string) => void;
   onNewClaude: (projectId: string, paneId?: string) => void;
@@ -114,6 +123,7 @@ export function ProjectView({
   ) => void;
 }) {
   const { loaded, shellProgram } = useSettings();
+  const treeRef = useRef<FileTreeHandle>(null);
 
   // Route cross-file go-to-definition / search reveals for this project to the
   // app's file opener; the target FileEditor drains the stashed reveal.
@@ -288,10 +298,26 @@ export function ProjectView({
             style={{ width: sidebarWidth }}
             className="flex shrink-0 flex-col bg-bg"
           >
-            <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border-subtle pl-3 pr-1.5">
-              <span className="truncate text-[11px] font-medium uppercase tracking-wide text-fg-faint">
+            <header className="flex h-10 shrink-0 items-center justify-between gap-1 border-b border-border-subtle pl-3 pr-1.5">
+              <span className="min-w-0 flex-1 truncate text-[11px] font-medium uppercase tracking-wide text-fg-faint">
                 {tab.name}
               </span>
+              <button
+                onClick={() => treeRef.current?.newFile()}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-faint transition-colors hover:bg-bg-hover hover:text-fg"
+                aria-label="New file"
+                title="New file"
+              >
+                <FilePlus size={15} strokeWidth={1.8} />
+              </button>
+              <button
+                onClick={() => treeRef.current?.newFolder()}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-faint transition-colors hover:bg-bg-hover hover:text-fg"
+                aria-label="New folder"
+                title="New folder"
+              >
+                <FolderPlus size={15} strokeWidth={1.8} />
+              </button>
               <button
                 onClick={onToggleSidebar}
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-fg-faint transition-colors hover:bg-bg-hover hover:text-fg"
@@ -310,9 +336,14 @@ export function ProjectView({
                 </p>
               ) : (
                 <FileTreePanel
+                  ref={treeRef}
                   paths={tab.paths}
                   activeRelPath={activeFileRelPath}
                   onSelect={(rel) => onOpenFile(tab.id, rel)}
+                  onCreateFile={(rel) => onCreateFile(tab.id, rel)}
+                  onCreateFolder={(rel) => onCreateFolder(tab.id, rel)}
+                  onRenamePath={(from, to) => onRenamePath(tab.id, from, to)}
+                  onDeletePath={(rel) => onDeletePath(tab.id, rel)}
                 />
               )}
             </div>

@@ -7,10 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 // `appVersion()` is the version from tauri.conf.json, which CI stamps from the
 // release tag (see scripts/ci-set-version.mjs). In dev it's the committed
 // placeholder. Both are covered by `core:default`, so no extra capability.
-export {
-  getVersion as appVersion,
-  getTauriVersion,
-} from "@tauri-apps/api/app";
+export { getVersion as appVersion, getTauriVersion } from "@tauri-apps/api/app";
 
 /** Open the native folder picker. Returns the chosen absolute path, or null if cancelled. */
 export async function pickProjectFolder(): Promise<string | null> {
@@ -98,7 +95,12 @@ export interface SearchResults {
 export function searchProject(
   root: string,
   query: string,
-  opts: { regex: boolean; caseSensitive: boolean; include: string; exclude: string },
+  opts: {
+    regex: boolean;
+    caseSensitive: boolean;
+    include: string;
+    exclude: string;
+  },
 ): Promise<SearchResults> {
   return invoke<SearchResults>("search_project", {
     root,
@@ -250,6 +252,30 @@ export function writeFileText(
   content: string,
 ): Promise<void> {
   return invoke("write_file_text", { root, rel, content });
+}
+
+/** Create an empty file (project root + relative path). Rejects if it exists. */
+export function createFile(root: string, rel: string): Promise<void> {
+  return invoke("create_file", { root, rel });
+}
+
+/** Create a directory (project root + relative path). Rejects if it exists. */
+export function createDirectory(root: string, rel: string): Promise<void> {
+  return invoke("create_directory", { root, rel });
+}
+
+/** Delete a file, or a directory and all its contents (project root + relative). */
+export function deletePath(root: string, rel: string): Promise<void> {
+  return invoke("delete_path", { root, rel });
+}
+
+/** Rename/move a file or directory within a project (relative paths). */
+export function renamePath(
+  root: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  return invoke("rename_path", { root, from, to });
 }
 
 // --- Prettier ---
@@ -506,7 +532,11 @@ export function ptyWrite(id: string, data: string): Promise<void> {
   return invoke("pty_write", { id, data });
 }
 
-export function ptyResize(id: string, cols: number, rows: number): Promise<void> {
+export function ptyResize(
+  id: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
   return invoke("pty_resize", { id, cols, rows });
 }
 
@@ -639,7 +669,15 @@ export function browserCreate(
   width: number,
   height: number,
 ): Promise<void> {
-  return invoke("browser_create", { id, url, projectRoot, x, y, width, height });
+  return invoke("browser_create", {
+    id,
+    url,
+    projectRoot,
+    x,
+    y,
+    width,
+    height,
+  });
 }
 
 /**
